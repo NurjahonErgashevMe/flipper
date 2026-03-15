@@ -13,21 +13,22 @@ class Settings(BaseSettings):
     credentials_path: str = os.path.join(os.path.dirname(__file__), "credentials.json")
 
     # Proxy Settings
-    proxy_user: str
-    proxy_pass: str
-    proxy_host: str
-    proxy_port: int
+    proxy_username: str
+    proxy_password: str
+    # proxy_host: str
+    # proxy_port: int
     change_ip_url: str
+    http_proxy: str
 
     model_config = SettingsConfigDict(
-        env_file=os.path.join(os.path.dirname(__file__), ".env"),
+        env_file=os.path.join(os.path.dirname(__file__), "..", ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
-    @property
-    def proxy_url_http(self) -> str:
-        return f"http://{self.proxy_user}:{self.proxy_pass}@{self.proxy_host}:{self.proxy_port}"
+    # @property
+    # def proxy_url_http(self) -> str:
+    #     return f"http://{self.proxy_username}:{self.proxy_password}@{self.proxy_host}:{self.proxy_port}"
 
 
 settings = Settings()

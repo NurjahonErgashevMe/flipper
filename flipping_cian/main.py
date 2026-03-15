@@ -62,7 +62,7 @@ async def main():
 
             try:
                 parser = cianparser.CianParser(
-                    location="Москва", proxies=[settings.proxy_url_http]
+                    location="Москва", proxies=[settings.http_proxy]
                 )
 
                 deal_type = "sale" if "sale" in search_url else "rent"

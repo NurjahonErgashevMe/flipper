@@ -1,0 +1,113 @@
+x-common-env: &common-env
+  REDIS_URL: ${REDIS_URL:-redis://firecrawl_redis:6379}
+  REDIS_RATE_LIMIT_URL: ${REDIS_URL:-redis://firecrawl_redis:6379}
+  DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@firecrawl_db:5432/firecrawl}
+  NUQ_DATABASE_URL: ${NUQ_DATABASE_URL:-postgresql://postgres:postgres@firecrawl_db:5432/firecrawl}
+  NUQ_RABBITMQ_URL: ${NUQ_RABBITMQ_URL:-amqp://guest:guest@firecrawl_rabbitmq:5672}
+  PLAYWRIGHT_MICROSERVICE_URL: ${PLAYWRIGHT_MICROSERVICE_URL}
+  USE_DB_AUTHENTICATION: ${USE_DB_AUTHENTICATION:-false}
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL}
+  MODEL_NAME: ${MODEL_NAME}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
+  HTTP_PROXY: ${HTTP_PROXY}
+  HTTPS_PROXY: ${HTTPS_PROXY}
+  NO_PROXY: ${NO_PROXY}
+  TG_BOT_TOKEN: ${TG_BOT_TOKEN}
+  TG_CHAT_ID: ${TG_CHAT_ID}
+
+services:
+  # Сервис управления куками
+  cookie_manager:
+    build:
+      context: ./cookie_manager
+      dockerfile: Dockerfile
+    container_name: cookie_manager
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./cookie_manager/cookies.json:/app/cookies.json
+      - ./cookie_manager:/app
+
+  # API сервис Firecrawl
+  firecrawl_api:
+    build:
+      context: ./firecrawl/apps/api
+      dockerfile: Dockerfile
+    container_name: firecrawl_api
+    restart: unless-stopped
+    ports:
+      - "3003:3002"
+    environment:
+      <<: *common-env
+      PORT: 3002
+      HOST: "0.0.0.0"
+    depends_on:
+      - firecrawl_redis
+      - firecrawl_db
+      - firecrawl_rabbitmq
+      - cookie_manager
+
+  # Воркер сервис
+  firecrawl_worker:
+    build:
+      context: ./firecrawl/apps/api
+      dockerfile: Dockerfile
+    container_name: firecrawl_worker
+    restart: unless-stopped
+    command: ["node", "dist/src/services/worker/scrape-worker.js"]
+    environment:
+      <<: *common-env
+      HOST: "0.0.0.0"
+    depends_on:
+      - firecrawl_redis
+      - firecrawl_db
+      - firecrawl_rabbitmq
+      - cookie_manager
+
+  # Микросервис браузера
+  playwright_service:
+    build: ./firecrawl/apps/playwright-service-ts
+    container_name: playwright_service
+    restart: unless-stopped
+    shm_size: '2gb'
+    environment:
+      PORT: 3000
+      CONCURRENCY: 10
+      PROXY_SERVER: ${PROXY_SERVER}
+      PROXY_USERNAME: ${PROXY_USERNAME}
+      PROXY_PASSWORD: ${PROXY_PASSWORD}
+    depends_on:
+      - cookie_manager
+
+  firecrawl_redis:
+    image: redis:alpine
+    container_name: firecrawl_redis
+    restart: unless-stopped
+
+  firecrawl_db:
+    build:
+      context: ./firecrawl/apps/nuq-postgres
+    container_name: firecrawl_db
+    restart: unless-stopped
+    command: postgres -c shared_preload_libraries='pg_cron' -c cron.database_name='firecrawl'
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-firecrawl}
+    volumes:
+      - firecrawl_data:/var/lib/postgresql/data
+
+  firecrawl_rabbitmq:
+    image: rabbitmq:3-management
+    container_name: firecrawl_rabbitmq
+    restart: unless-stopped
+    ports:
+      - "15672:15672"
+
+volumes:
+  firecrawl_data:
