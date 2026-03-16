@@ -9,8 +9,8 @@ logger = logging.getLogger(__name__)
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
-# Это IP-адрес или домен вашего сервера, где запущен NoVNC. В локальной разработке - localhost
-NOVNC_URL = os.getenv("NOVNC_URL", "http://localhost:8080/vnc.html")
+# Это IP-адрес или домен вашего сервера, где запущен NoVNC. 
+NOVNC_URL = os.getenv("NOVNC_URL", "http://127.0.0.1:8080/vnc.html")
 
 HEADERS = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -100,8 +100,6 @@ async def start_recovery_session(cookies_file_path: str):
         page = await context.new_page()
 
         # Отправляем уведомление в Telegram.
-        # Telegram не разрешает 'localhost' в кнопках (ошибка 400),
-        # поэтому вставляем ссылку прямо в текст.
         msg = (
             "⚠️ <b>Сессия Циан истекла (или куки пустые)!</b>\n\n"
             "Парсинг приостановлен.\n\n"

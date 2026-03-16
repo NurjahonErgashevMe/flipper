@@ -5,9 +5,8 @@ echo "[entrypoint] Starting Cookie Manager services..."
 
 # ── 1. Start Xvfb (virtual display for headless Chromium via NoVNC) ──────────
 echo "[entrypoint] Starting Xvfb on :99..."
+rm -f /tmp/.X99-lock  # Удаляем старый лок-файл при перезапуске
 Xvfb :99 -screen 0 1280x800x24 -nolisten tcp &
-XVFB_PID=$!
-export DISPLAY=:99
 
 # Give Xvfb a moment to initialize
 sleep 1

@@ -108,7 +108,7 @@ async def _monitor_loop():
     await asyncio.sleep(60)
 
     while True:
-        logger.info(f"[Monitor] Running scheduled cookie check...")
+        logger.info("[Monitor] Running scheduled cookie check...")
         valid = await _check_cookies_validity()
         _last_check_result = valid
 
@@ -225,3 +225,8 @@ async def upload_cookies(cookies: list):
     )
     logger.info(f"Uploaded {len(cookies)} cookies manually.")
     return {"status": "ok", "cookie_count": len(cookies)}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
