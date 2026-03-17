@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 COOKIES_FILE      = os.getenv("COOKIES_FILE", "/app/cookies.json")
-CHECK_INTERVAL    = int(os.getenv("COOKIE_CHECK_INTERVAL", "600"))  # 10 минут
+CHECK_INTERVAL    = int(os.getenv("COOKIE_CHECK_INTERVAL", "1800"))  # 30 минут
 MAX_FAIL_ATTEMPTS = 3  # сколько раз проверить перед отправкой в recovery
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ async def _check_cookies_validity() -> bool:
         return False
     
     # Проверяем критичные куки
-    critical_cookies = {"DMIR_AUTH", "remixsid"}
+    critical_cookies = {"DMIR_AUTH"}
     cookie_dict = {c["name"]: c["value"] for c in cookies}
     
     missing_or_empty = []
@@ -209,7 +209,7 @@ async def get_status():
     cookies = _load_cookies()
     
     # Проверяем критичные куки
-    critical_cookies = {"DMIR_AUTH", "remixsid"}
+    critical_cookies = {"DMIR_AUTH"}
     cookie_dict = {c["name"]: c["value"] for c in cookies}
     
     critical_status = {}

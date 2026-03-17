@@ -221,6 +221,33 @@ class AdParser:
                 "housing_type": {
                     "type": "string",
                     "description": "Тип жилья"
+                },
+                "price_history": {
+                    "type": "array",
+                    "description": "История изменения цены (если есть раздел 'История цены')",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "date": {
+                                "type": "string",
+                                "description": "Дата изменения (например: '10 мар 2026')"
+                            },
+                            "price": {
+                                "type": "integer",
+                                "description": "Цена в рублях на эту дату"
+                            },
+                            "change_amount": {
+                                "type": "integer",
+                                "description": "На сколько изменилась цена по сравнению с предыдущей (0 для первой публикации)"
+                            },
+                            "change_type": {
+                                "type": "string",
+                                "enum": ["initial", "decrease", "increase"],
+                                "description": "Тип: 'initial' (первая цена), 'decrease' (снижение), 'increase' (повышение)"
+                            }
+                        },
+                        "required": ["date", "price", "change_amount", "change_type"]
+                    }
                 }
             },
             "required": ["price", "area", "cian_id"]

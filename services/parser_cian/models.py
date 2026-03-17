@@ -6,7 +6,7 @@ services.parser_cian.models - Pydantic models for Cian real estate ads
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Literal
 from datetime import datetime
 
 
@@ -41,6 +41,27 @@ class FloorInfo(BaseModel):
     all: Optional[int] = Field(
         None, 
         description="Всего этажей в здании."
+    )
+
+
+class PriceHistoryEntry(BaseModel):
+    """Запись истории изменения цены"""
+    
+    date: str = Field(
+        ...,
+        description="Дата изменения цены (например: '10 мар 2026')"
+    )
+    price: int = Field(
+        ...,
+        description="Цена в рублях на эту дату"
+    )
+    change_amount: int = Field(
+        0,
+        description="На сколько изменилась цена (0 для первой публикации)"
+    )
+    change_type: Literal["initial", "decrease", "increase"] = Field(
+        "initial",
+        description="Тип изменения: initial (первая цена), decrease (снижение), increase (повышение)"
     )
 
 
@@ -138,6 +159,12 @@ class ParsedAdData(BaseModel):
     unique_views: Optional[str] = Field(
         None,
         description="Уникальных просмотров.",
+    )
+
+    # История цен
+    price_history: Optional[List[PriceHistoryEntry]] = Field(
+        None,
+        description="История изменения цены объявления (если есть).",
     )
 
     # Служебные поля
