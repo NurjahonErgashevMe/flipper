@@ -44,7 +44,8 @@ class SheetsManager:
         self.credentials = service_account.Credentials.from_service_account_file(
             credentials_path, scopes=SCOPES
         )
-        self.service = build("sheets", "v4", credentials=self.credentials)
+        # Отключаем file_cache чтобы избежать warnings
+        self.service = build("sheets", "v4", credentials=self.credentials, cache_discovery=False)
         self.sheet = self.service.spreadsheets()
         
         logger.info(f"SheetsManager initialized for spreadsheet {spreadsheet_id}")
@@ -91,33 +92,68 @@ class SheetsManager:
         self, 
         tab_name: str, 
         row: List[Any],
-        clear_format: bool = False
+        clear_format: bool = False,
+        insert_at_top: bool = True
     ) -> bool:
         """
-        Добавляет одну строку в конец таблицы.
+        Добавляет одну строку в таблицу.
         
         Args:
             tab_name: Название табы (например "RESULTS", "PARSED")
             row: Список значений для строки
             clear_format: Если True, игнорирует форматирование ячеек
+            insert_at_top: Если True, вставляет строку после заголовка (строка 2)
             
         Returns:
             True если успешно, False если ошибка
         """
         try:
-            body = {"values": [row]}
-            result = (
-                self.sheet.values()
-                .append(
+            if insert_at_top:
+                # Вставляем пустую строку после заголовка
+                self.service.spreadsheets().batchUpdate(
                     spreadsheetId=self.spreadsheet_id,
-                    range=f"{tab_name}!A:Z",
-                    valueInputOption="USER_ENTERED",
-                    insertDataOption="INSERT_ROWS",
-                    body=body,
+                    body={
+                        "requests": [{
+                            "insertDimension": {
+                                "range": {
+                                    "sheetId": self._get_sheet_id(tab_name),
+                                    "dimension": "ROWS",
+                                    "startIndex": 1,
+                                    "endIndex": 2
+                                },
+                                "inheritFromBefore": False
+                            }
+                        }]
+                    }
+                ).execute()
+                # Записываем данные в новую строку 2
+                body = {"values": [row]}
+                result = (
+                    self.sheet.values()
+                    .update(
+                        spreadsheetId=self.spreadsheet_id,
+                        range=f"{tab_name}!A2:Z2",
+                        valueInputOption="USER_ENTERED",
+                        body=body,
+                    )
+                    .execute()
                 )
-                .execute()
-            )
-            success = "updates" in result and result["updates"]["updatedRows"] > 0
+                success = "updatedRows" in result and result["updatedRows"] > 0
+            else:
+                body = {"values": [row]}
+                result = (
+                    self.sheet.values()
+                    .append(
+                        spreadsheetId=self.spreadsheet_id,
+                        range=f"{tab_name}!A:Z",
+                        valueInputOption="USER_ENTERED",
+                        insertDataOption="INSERT_ROWS",
+                        body=body,
+                    )
+                    .execute()
+                )
+                success = "updates" in result and result["updates"]["updatedRows"] > 0
+            
             if success:
                 logger.debug(f"Wrote 1 row to {tab_name}")
             return success
@@ -126,19 +162,35 @@ class SheetsManager:
             logger.error(f"Failed to write row to Google Sheets: {e}")
             return False
 
+    def _get_sheet_id(self, tab_name: str) -> int:
+        """Получает ID листа по имени"""
+        try:
+            sheet_metadata = self.service.spreadsheets().get(
+                spreadsheetId=self.spreadsheet_id
+            ).execute()
+            for sheet in sheet_metadata.get('sheets', []):
+                if sheet['properties']['title'] == tab_name:
+                    return sheet['properties']['sheetId']
+            raise ValueError(f"Sheet '{tab_name}' not found")
+        except Exception as e:
+            logger.error(f"Failed to get sheet ID: {e}")
+            raise
+
     def write_rows(
         self, 
         tab_name: str, 
         rows: List[List[Any]],
-        clear_format: bool = False
+        clear_format: bool = False,
+        insert_at_top: bool = True
     ) -> bool:
         """
-        Добавляет несколько строк в конец таблицы (batch операция).
+        Добавляет несколько строк в таблицу (batch операция).
         
         Args:
             tab_name: Название табы
             rows: Список списков значений
             clear_format: Если True, игнорирует форматирование
+            insert_at_top: Если True, вставляет строки после заголовка
             
         Returns:
             True если успешно, False если ошибка
@@ -148,22 +200,28 @@ class SheetsManager:
             return True
 
         try:
-            body = {"values": rows}
-            result = (
-                self.sheet.values()
-                .append(
-                    spreadsheetId=self.spreadsheet_id,
-                    range=f"{tab_name}!A:Z",
-                    valueInputOption="USER_ENTERED",
-                    insertDataOption="INSERT_ROWS",
-                    body=body,
+            if insert_at_top:
+                # Вставляем строки после заголовка
+                for row in reversed(rows):
+                    self.write_row(tab_name, row, clear_format, insert_at_top=True)
+                return True
+            else:
+                body = {"values": rows}
+                result = (
+                    self.sheet.values()
+                    .append(
+                        spreadsheetId=self.spreadsheet_id,
+                        range=f"{tab_name}!A:Z",
+                        valueInputOption="USER_ENTERED",
+                        insertDataOption="INSERT_ROWS",
+                        body=body,
+                    )
+                    .execute()
                 )
-                .execute()
-            )
-            success = "updates" in result and result["updates"]["updatedRows"] > 0
-            if success:
-                logger.info(f"Wrote {len(rows)} rows to {tab_name}")
-            return success
+                success = "updates" in result and result["updates"]["updatedRows"] > 0
+                if success:
+                    logger.info(f"Wrote {len(rows)} rows to {tab_name}")
+                return success
             
         except Exception as e:
             logger.error(f"Failed to write {len(rows)} rows to Google Sheets: {e}")

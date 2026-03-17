@@ -176,29 +176,16 @@ class ParsedAdData(BaseModel):
     )
 
     # Служебные поля
-    parsed_at: str = Field(
-        default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    parsed_at: datetime = Field(
+        default_factory=datetime.now,
         description="Когда данные были распарсены.",
     )
 
     class Config:
-        json_schema_extra = {
-            "example": {
-                "url": "https://www.cian.ru/sale/flat/312533860/",
-                "cian_id": "312533860",
-                "price": 20000000,
-                "title": "2-комнатная квартира, 45 м², этаж 3/5",
-                "address": {
-                    "full": "Москва, ул. Ленина, д. 10",
-                    "district": "Даниловский",
-                    "metro_station": "Октябрьская",
-                    "okrug": "ЮАО"
-                },
-                "area": 45.5,
-                "rooms": 2,
-                "parsed_at": "2024-01-15 14:30:00"
-            }
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
         }
+
 
 
 # ========================
@@ -236,6 +223,9 @@ def parse_to_sheets_row(data: ParsedAdData) -> List[Any]:
         total = data.floor_info.all or ""
         floor_str = f"{curr}/{total}" if curr and total else (str(curr) if curr else "")
 
+    # Форматируем дату для Google Sheets
+    parsed_at_str = data.parsed_at.strftime("%Y-%m-%d %H:%M:%S")
+
     # Собираем строку согласно схеме Google Sheets
     return [
         data.url or "",                                    # A: URL
@@ -259,5 +249,5 @@ def parse_to_sheets_row(data: ParsedAdData) -> List[Any]:
         data.total_views or "",                            # S: Всего просмотров
         data.unique_views or "",                           # T: Уникальных просмотров
         data.cian_id or "",                                # U: ID Cian
-        data.parsed_at,                                    # V: Время парсинга
+        parsed_at_str,                                     # V: Время парсинга
     ]

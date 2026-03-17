@@ -9,8 +9,8 @@ import asyncio
 import logging
 from typing import List, Callable, Optional
 
-from parser import AdParser
-from models import ParsedAdData, parse_to_sheets_row
+from services.parser_cian.parser import AdParser
+from services.parser_cian.models import ParsedAdData, parse_to_sheets_row
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ class QueueManager:
                 success = await loop.run_in_executor(
                     None, 
                     self.sheets_manager.write_row, 
-                    "RESULTS",  # Tab name
+                    "PARSED",
                     row
                 )
 

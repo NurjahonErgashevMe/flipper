@@ -23,21 +23,22 @@ services:
       retries: 3
       start_period: 10s
 
-  # parser_cian:
-  #   build:
-  #     context: .  # Контекст - корень проекта
-  #     dockerfile: ./services/parser_cian/Dockerfile
-  #   container_name: parser_cian
-  #   restart: unless-stopped
-  #   env_file:
-  #     - .env
-  #   volumes:
-  #     - ./credentials.json:/app/credentials.json
-  #   depends_on:
-  #     cookie_manager:
-  #       condition: service_healthy
-  #   networks:
-  #     - flipper_network
+  parser_cian:
+    build:
+      context: .  # Контекст - корень проекта
+      dockerfile: ./services/parser_cian/Dockerfile
+    container_name: parser_cian
+    env_file:
+      - .env
+    volumes:
+      - ./credentials.json:/app/credentials.json
+    depends_on:
+      cookie_manager:
+        condition: service_healthy
+    networks:
+      - flipper_network
+    profiles:
+      - manual  # Запускается только вручную
 
   app_redis:
     image: redis:alpine

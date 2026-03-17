@@ -6,3 +6,10 @@ google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.0
 python-dotenv==1.0.0
 requests==2.31.0
+
+# cianparser dependencies
+cloudscraper
+beautifulsoup4
+transliterate
+lxml
+curl-cffi

@@ -20,6 +20,8 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(current_dir, 'services', 'parser_cian'))
 
 from services.parser_cian.parser import AdParser
+from services.parser_cian.models import parse_to_sheets_row
+from packages.flipper_core.sheets import SheetsManager
 
 # Загружаем переменные из .env
 load_dotenv()
@@ -28,6 +30,18 @@ async def test_single_ad():
     if not os.getenv("FIRECRAWL_API_KEY"):
         logger.error("❌ Ошибка: FIRECRAWL_API_KEY не установлен в .env")
         return
+
+    # Инициализация Google Sheets Manager
+    spreadsheet_id = os.getenv("SPREADSHEET_ID")
+    credentials_path = os.getenv("CREDENTIALS_PATH", "credentials.json")
+    
+    sheets_manager = None
+    if spreadsheet_id and os.path.exists(credentials_path):
+        logger.info("📊 Инициализация Google Sheets Manager...")
+        sheets_manager = SheetsManager(spreadsheet_id, credentials_path)
+        logger.info("✅ Google Sheets Manager готов")
+    else:
+        logger.warning("⚠️ Google Sheets не настроен (пропущен SPREADSHEET_ID или credentials.json)")
 
     # Подключаемся к менеджеру кук (он запущен в Docker и доступен на 8000 порту локалхоста)
     logger.info("🔌 Подключаемся к Cookie Manager...")
@@ -43,7 +57,7 @@ async def test_single_ad():
         # Сохраняем данные в data.json
         output_file = "data.json"
         with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(data.model_dump(), f, ensure_ascii=False, indent=2)
+            json.dump(data.model_dump(mode='json'), f, ensure_ascii=False, indent=2)
         logger.info(f"💾 Данные сохранены в {output_file}")
         
         logger.info("\n" + "="*80)
@@ -88,6 +102,19 @@ async def test_single_ad():
                 )
         else:
             logger.info("\nℹ️ История цен отсутствует (цена не менялась)")
+        
+        # Сохранение в Google Sheets
+        if sheets_manager:
+            logger.info("\n💾 Сохранение в Google Sheets...")
+            try:
+                row = parse_to_sheets_row(data)
+                success = sheets_manager.write_row("PARSED", row)
+                if success:
+                    logger.info("✅ Данные успешно записаны в Google Sheets (таб PARSED)")
+                else:
+                    logger.error("❌ Не удалось записать данные в Google Sheets")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при записи в Google Sheets: {e}", exc_info=True)
         
         logger.info("\n" + "="*80)
         logger.info("✅ ТЕСТ ЗАВЕРШЕН УСПЕШНО!")

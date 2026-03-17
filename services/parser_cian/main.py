@@ -13,11 +13,11 @@ import sys
 from packages.flipper_core.sheets import SheetsManager
 from packages.flipper_core.utils import log_section
 
-# Локальные модули сервиса (БЕЗ ТОЧЕК в начале)
-from config import settings, validate_config
-from parser import AdParser
-from queue_manager import QueueManager
-from search_parser import extract_batch_from_searches
+# Локальные модули сервиса
+from services.parser_cian.config import settings, validate_config
+from services.parser_cian.parser import AdParser
+from services.parser_cian.queue_manager import QueueManager
+from services.parser_cian.search_parser import extract_ad_urls_from_search
 
 # Настройка логирования
 logging.basicConfig(
@@ -65,24 +65,55 @@ async def main():
         # === STEP 3: Read URLs from Google Sheets ===
         log_section("Step 3: Reading URLs from Google Sheets")
         
-        logger.info("Reading URLs from 'FILTERS' tab...")
+        logger.info("Reading search URLs from 'FILTERS' tab...")
         search_urls = sheets_manager.get_urls(tab_name="FILTERS", column="A")
         
         if not search_urls:
-            logger.warning("No URLs found in FILTERS tab")
+            logger.warning("No search URLs found in FILTERS tab")
             logger.info("Exiting gracefully")
             return
         
-        logger.info(f"✓ Found {len(search_urls)} URLs to process")
+        logger.info(f"✓ Found {len(search_urls)} search URLs (categories)")
 
-        # === STEP 4: Parse URLs ===
-        log_section("Step 4: Processing URLs")
+        # === STEP 4: Extract Ad URLs from Search Pages ===
+        log_section("Step 4: Extracting Ad URLs from Search Pages")
         
-        logger.info(f"Starting asynchronous parsing of {len(search_urls)} URLs...")
-        stats = await queue_manager.run(search_urls)
+        all_ad_urls = []
+        for i, search_url in enumerate(search_urls, 1):
+            logger.info(f"📋 Processing category {i}/{len(search_urls)}...")
+            logger.info(f"   URL: {search_url[:100]}...")
+            
+            try:
+                # Извлекаем первые 3 объявления из каждой категории
+                ad_urls = extract_ad_urls_from_search(
+                    search_url=search_url,
+                    location="Москва",
+                    max_urls=1,
+                    http_proxy=settings.http_proxy if settings.http_proxy else None
+                )
+                
+                logger.info(f"   ✓ Extracted {len(ad_urls)} ad URLs from category {i}")
+                all_ad_urls.extend(ad_urls)
+                
+            except Exception as e:
+                logger.error(f"   ❌ Failed to extract ads from category {i}: {e}")
+                continue
+        
+        if not all_ad_urls:
+            logger.warning("No ad URLs extracted from any category")
+            logger.info("Exiting gracefully")
+            return
+        
+        logger.info(f"✓ Total ad URLs to parse: {len(all_ad_urls)}")
 
-        # === STEP 5: Report Results ===
-        log_section("Step 5: Execution Summary")
+        # === STEP 5: Parse Ad URLs ===
+        log_section("Step 5: Parsing Individual Ads")
+        
+        logger.info(f"Starting asynchronous parsing of {len(all_ad_urls)} ad URLs...")
+        stats = await queue_manager.run(all_ad_urls)
+
+        # === STEP 6: Report Results ===
+        log_section("Step 6: Execution Summary")
         
         logger.info(f"Total URLs processed:  {stats['total']}")
         logger.info(f"Successfully parsed:   {stats['processed']}")
