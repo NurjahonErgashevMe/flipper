@@ -127,15 +127,15 @@ class ParsedAdData(BaseModel):
         None,
         description="Дата публикации объявления.",
     )
-    days_in_exposition: Optional[int] = Field(
+    days_in_exposition: Optional[str] = Field(
         None,
         description="Дней объявление в каталоге.",
     )
-    total_views: Optional[int] = Field(
+    total_views: Optional[str] = Field(
         None,
         description="Всего просмотров.",
     )
-    unique_views: Optional[int] = Field(
+    unique_views: Optional[str] = Field(
         None,
         description="Уникальных просмотров.",
     )

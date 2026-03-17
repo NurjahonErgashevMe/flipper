@@ -311,11 +311,17 @@ curl http://localhost:8000/status | jq
 # Check logs
 docker-compose logs parser_cian
 
-# Test single URL (if using test script)
+# Test single URL (local development)
 python test_parser.py
+
+# Test with multiple workers (local development)
+python test_queue.py
 
 # Check connection to Cookie Manager
 curl http://localhost:8000/health
+
+# See detailed logging guide
+cat LOGGING_GUIDE.md
 ```
 
 ### Google Sheets Errors
@@ -365,8 +371,11 @@ COOKIE_CHECK_INTERVAL=3600  # 1 hour
 | **[STRUCTURE.md](./STRUCTURE.md)** | System Design: архитектура, компоненты, потоки данных |
 | **[MIGRATION_GUIDE.md](./MIGRATION_GUIDE.md)** | Процесс миграции из monolith → Monorepo |
 | **[DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md)** | Production deployment checklist |
+| **[PRODUCTION_GUIDE.md](./PRODUCTION_GUIDE.md)** | Переход от тестирования к production |
 | **[ARCHITECTURE.md](./ARCHITECTURE.md)** | Подробное описание каждого микросервиса |
 | **[TESTING_GUIDE.md](./TESTING_GUIDE.md)** | Локальное тестирование и отладка |
+| **[LOGGING_GUIDE.md](./LOGGING_GUIDE.md)** | Система логирования и мониторинг парсинга |
+| **[COOKIE_MANAGER_LOGIC.md](./COOKIE_MANAGER_LOGIC.md)** | Логика работы Cookie Manager и проверки кук |
 | **[THIRD_PARTY.md](./THIRD_PARTY.md)** | Встроенные библиотеки (cianparser, etc) |
 | **[INTEGRATION_REPORT.md](./INTEGRATION_REPORT.md)** | Отчет об интеграции cianparser ✅ |
 
@@ -375,6 +384,8 @@ COOKIE_CHECK_INTERVAL=3600  # 1 hour
 - **Для новичков:** Начните с [STRUCTURE.md](./STRUCTURE.md)
 - **Для деплоя:** [DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md)
 - **Для разработки:** [TESTING_GUIDE.md](./TESTING_GUIDE.md)
+- **Для production:** [PRODUCTION_GUIDE.md](./PRODUCTION_GUIDE.md)
+- **Для мониторинга:** [LOGGING_GUIDE.md](./LOGGING_GUIDE.md)
 - **Для внешних lib:** [THIRD_PARTY.md](./THIRD_PARTY.md)
 
 ---

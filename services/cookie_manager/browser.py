@@ -42,6 +42,10 @@ async def check_session_validity(cookie_str: str) -> bool:
     """
     Проверяет валидность сессии, делает 3 попытки, если сессия кажется невалидной.
     """
+    if not cookie_str or cookie_str.strip() == "":
+        logger.warning("Cookie string is empty, session is invalid.")
+        return False
+    
     headers = HEADERS.copy()
     headers["cookie"] = cookie_str
 
@@ -49,15 +53,30 @@ async def check_session_validity(cookie_str: str) -> bool:
     async with httpx.AsyncClient(timeout=10.0) as client:
         for attempt in range(attempts):
             try:
-                # Делаем запрос к профилю, как просил пользователь
+                # Делаем запрос к профилю
                 response = await client.get(
-                    "https://my.cian.ru/profile", headers=headers
+                    "https://my.cian.ru/profile", 
+                    headers=headers,
+                    follow_redirects=False  # Не следуем редиректам
                 )
+                
+                # Если редирект на /authenticate/ - не авторизованы
+                if response.status_code in [301, 302, 303, 307, 308]:
+                    location = response.headers.get("location", "")
+                    if "authenticate" in location:
+                        logger.warning(
+                            f"Session check attempt {attempt + 1}: Redirected to login page"
+                        )
+                        if attempt < attempts - 1:
+                            await asyncio.sleep(5)
+                        continue
+                
                 html_text = response.text
 
-                # Ищем признак успешной авторизации.
+                # Ищем признак успешной авторизации
                 if '"isAuthenticated":true' in html_text:
-                    return True  # Успешно!
+                    logger.info(f"✅ Session is valid (attempt {attempt + 1})")
+                    return True
 
                 logger.warning(
                     f"Session check attempt {attempt + 1} failed: 'isAuthenticated':true not found."
@@ -69,6 +88,7 @@ async def check_session_validity(cookie_str: str) -> bool:
             if attempt < attempts - 1:
                 await asyncio.sleep(5)
 
+    logger.error("❌ All 3 attempts failed - session is INVALID")
     return False  # Все 3 попытки провалились
 
 

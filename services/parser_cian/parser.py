@@ -8,6 +8,7 @@ services.parser_cian.parser - AdParser for Firecrawl integration
 import os
 import logging
 import httpx
+import asyncio
 from typing import Dict, Any
 from models import ParsedAdData
 
@@ -52,6 +53,12 @@ class AdParser:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(f"{self.cookie_manager_url}/cookies")
+                
+                # Если 503 - recovery в процессе
+                if resp.status_code == 503:
+                    logger.warning("⚠️ Cookie Manager: Recovery in progress")
+                    return ""
+                
                 if resp.status_code == 200:
                     cookies = resp.json()
                     cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
@@ -63,6 +70,79 @@ class AdParser:
         except Exception as e:
             logger.error(f"Failed to fetch cookies from manager: {e}")
             return ""
+    
+    async def _check_authentication(self, cookie_str: str, attempts: int = 3) -> bool:
+        """
+        Проверяет авторизацию на Cian.ru.
+        Делает 3 попытки с паузой 5 сек.
+        
+        Args:
+            cookie_str: Строка кук
+            attempts: Количество попыток
+            
+        Returns:
+            True если авторизован, False если нет
+        """
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Cookie": cookie_str
+        }
+        
+        for attempt in range(attempts):
+            try:
+                logger.info(f"🔍 Checking authentication (attempt {attempt + 1}/{attempts})...")
+                async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+                    resp = await client.get("https://my.cian.ru/profile", headers=headers)
+                    
+                    # Если редирект на /authenticate/ - не авторизованы
+                    if resp.status_code in [301, 302, 303, 307, 308]:
+                        location = resp.headers.get("location", "")
+                        if "authenticate" in location:
+                            logger.warning(f"⚠️ Attempt {attempt + 1}: Redirected to login page")
+                            logger.warning(f"❌ isAuthenticated: false (redirect to {location})")
+                            if attempt < attempts - 1:
+                                await asyncio.sleep(5)
+                            continue
+                    
+                    html = resp.text
+                    
+                    # Проверяем наличие isAuthenticated
+                    if '"isAuthenticated":true' in html:
+                        logger.info(f"✅ isAuthenticated: true (attempt {attempt + 1})")
+                        logger.info(f"✅ Authentication OK")
+                        return True
+                    elif '"isAuthenticated":false' in html:
+                        logger.warning(f"❌ isAuthenticated: false (attempt {attempt + 1})")
+                    else:
+                        logger.warning(f"⚠️ isAuthenticated not found in HTML (attempt {attempt + 1})")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Attempt {attempt + 1} error: {e}")
+            
+            if attempt < attempts - 1:
+                logger.info(f"⏳ Waiting 5 seconds before retry...")
+                await asyncio.sleep(5)
+        
+        logger.error("❌❌❌ All authentication checks failed - isAuthenticated: false")
+        return False
+    
+    async def _check_and_trigger_recovery(self):
+        """
+        Проверяет статус Cookie Manager и запускает recovery если нужно.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                # Запускаем принудительную проверку
+                resp = await client.post(f"{self.cookie_manager_url}/check")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if not data.get("valid"):
+                        logger.warning("🚨 Cookie Manager confirmed: cookies are INVALID")
+                        # Recovery уже запущен автоматически
+                    else:
+                        logger.info("✅ Cookie Manager says cookies are valid")
+        except Exception as e:
+            logger.error(f"Failed to trigger recovery check: {e}")
 
     def _get_schema(self) -> Dict[str, Any]:
         """
@@ -93,6 +173,10 @@ class AdParser:
                 "address_metro_station": {
                     "type": "string",
                     "description": "Ближайшее метро"
+                },
+                "metro_walk_time": {
+                    "type": "integer",
+                    "description": "Время пешком до метро в минутах (только число)"
                 },
                 "address_okrug": {
                     "type": "string",
@@ -137,10 +221,6 @@ class AdParser:
                 "housing_type": {
                     "type": "string",
                     "description": "Тип жилья"
-                },
-                "publish_date": {
-                    "type": "string",
-                    "description": "Дата публикации"
                 }
             },
             "required": ["price", "area", "cian_id"]
@@ -159,10 +239,16 @@ class AdParser:
         Raises:
             ValueError: Если ошибка при парсинге или извлечении данных
         """
-        logger.debug(f"Parsing: {url}")
+        logger.info(f"🔍 Начинаю парсинг: {url}")
         
         # Получаем куки
         cookies_str = await self._get_cookies()
+        
+        # Если куки пустые - проверяем статус Cookie Manager
+        if not cookies_str:
+            logger.warning("⚠️ Cookies are empty, checking Cookie Manager status...")
+            await self._check_and_trigger_recovery()
+            raise ValueError("Cookies are empty. Recovery triggered. Please retry later.")
 
         # Формируем Payload для Firecrawl API
         payload = {
@@ -207,17 +293,32 @@ class AdParser:
 
             if "data" not in result or "json" not in result.get("data", {}):
                 # Если данных нет, может быть проблема с сессией
-                logger.warning(f"No JSON data extracted for {url}")
+                logger.warning(f"No JSON data extracted for {url}, checking authentication...")
+                
+                # Проверяем авторизацию
+                is_auth = await self._check_authentication(cookies_str)
+                if not is_auth:
+                    logger.error("❌ Authentication failed! Triggering recovery...")
+                    await self._check_and_trigger_recovery()
+                    raise ValueError("Authentication failed. Recovery triggered.")
+                
                 raise ValueError("No JSON data extracted")
 
             extracted_data = result["data"]["json"]
             extracted_data["url"] = url
+            
+            # Устанавливаем значения "soon" для полей, которые не парсим через Firecrawl
+            extracted_data["publish_date"] = "soon"
+            extracted_data["days_in_exposition"] = "soon"
+            extracted_data["total_views"] = "soon"
+            extracted_data["unique_views"] = "soon"
 
             # Преобразуем плоский JSON в вложенные Pydantic модели
             normalized = self._normalize_data(extracted_data)
+            parsed = ParsedAdData(**normalized)
 
-            logger.debug(f"Successfully parsed {url}")
-            return ParsedAdData(**normalized)
+            logger.info(f"✅ Успешно спарсил: {url} | Цена: {parsed.price:,} руб | Площадь: {parsed.area} м²")
+            return parsed
 
         except Exception as e:
             logger.error(f"Parse error for {url}: {e}")

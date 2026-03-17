@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 COOKIES_FILE      = os.getenv("COOKIES_FILE", "/app/cookies.json")
-CHECK_INTERVAL    = int(os.getenv("COOKIE_CHECK_INTERVAL", "1800"))  # 30 минут
-MAX_FAIL_ATTEMPTS = 3  # сколько раз подряд false → считаем невалидными
+CHECK_INTERVAL    = int(os.getenv("COOKIE_CHECK_INTERVAL", "600"))  # 10 минут
+MAX_FAIL_ATTEMPTS = 3  # сколько раз проверить перед отправкой в recovery
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Cookie Manager", version="2.0.0")
@@ -74,26 +74,41 @@ async def _check_cookies_validity() -> bool:
     """
     cookies = _load_cookies()
     if not cookies:
-        logger.warning("No cookies to check.")
+        logger.warning("⚠️ No cookies found in file.")
+        return False
+    
+    # Проверяем критичные куки
+    critical_cookies = {"DMIR_AUTH", "remixsid"}
+    cookie_dict = {c["name"]: c["value"] for c in cookies}
+    
+    missing_or_empty = []
+    for name in critical_cookies:
+        value = cookie_dict.get(name, "")
+        if not value or value.strip() == "":
+            missing_or_empty.append(name)
+    
+    if missing_or_empty:
+        logger.error(f"❌ Critical cookies are empty or missing: {', '.join(missing_or_empty)}")
         return False
 
     cookie_str = _cookies_to_str(cookies)
 
     for attempt in range(MAX_FAIL_ATTEMPTS):
-        logger.info(f"Cookie validity check attempt {attempt + 1}/{MAX_FAIL_ATTEMPTS}...")
+        logger.info(f"🔍 Cookie validity check attempt {attempt + 1}/{MAX_FAIL_ATTEMPTS}...")
         try:
             valid = await check_session_validity(cookie_str)
             if valid:
-                logger.info("✅ Cookies are valid.")
+                logger.info(f"✅ Cookies are VALID (attempt {attempt + 1})")
                 return True
-            logger.warning(f"Attempt {attempt + 1}: isAuthenticated=false")
+            logger.warning(f"⚠️ Attempt {attempt + 1}: isAuthenticated=false")
         except Exception as e:
-            logger.warning(f"Attempt {attempt + 1} error: {e}")
+            logger.warning(f"⚠️ Attempt {attempt + 1} error: {e}")
 
         if attempt < MAX_FAIL_ATTEMPTS - 1:
+            logger.info(f"⏳ Waiting 10 seconds before retry...")
             await asyncio.sleep(10)
 
-    logger.error("❌ All attempts failed — cookies are invalid.")
+    logger.error("❌❌❌ All attempts failed — cookies are INVALID")
     return False
 
 
@@ -104,24 +119,26 @@ async def _monitor_loop():
     """
     global _last_check_result, _consecutive_failures
 
-    # Первая проверка через 60 сек после старта (даём время подняться сервисам)
-    await asyncio.sleep(60)
+    # Первая проверка через 30 сек после старта
+    await asyncio.sleep(30)
 
     while True:
-        logger.info("[Monitor] Running scheduled cookie check...")
+        logger.info(f"[Monitor] 🔍 Running scheduled cookie check (every {CHECK_INTERVAL}s)...")
         valid = await _check_cookies_validity()
         _last_check_result = valid
 
         if not valid:
             _consecutive_failures += 1
-            logger.warning(f"[Monitor] Cookies invalid. Consecutive failures: {_consecutive_failures}")
+            logger.error(f"[Monitor] ❌ Cookies INVALID. Consecutive failures: {_consecutive_failures}")
 
             if not _recovery_in_progress:
-                logger.info("[Monitor] Triggering recovery session...")
+                logger.warning("[Monitor] 🚨 Triggering recovery session...")
                 asyncio.create_task(_run_recovery())
+            else:
+                logger.info("[Monitor] Recovery already in progress, skipping...")
         else:
             _consecutive_failures = 0
-            logger.info("[Monitor] Cookies OK. Next check in %d seconds.", CHECK_INTERVAL)
+            logger.info(f"[Monitor] ✅ Cookies OK. Next check in {CHECK_INTERVAL} seconds.")
 
         await asyncio.sleep(CHECK_INTERVAL)
 
@@ -145,12 +162,20 @@ async def get_cookies():
     """
     Возвращает куки как JSON-список.
     Вызывается AdParser.get_cookies_str().
-    503 если куки пустые (запускает recovery автоматически).
+    503 если recovery в процессе (парсер должен остановиться).
     """
+    # Если recovery в процессе - блокируем парсер
+    if _recovery_in_progress:
+        logger.warning("⚠️ Recovery in progress - blocking parser")
+        raise HTTPException(
+            status_code=503,
+            detail="Cookie recovery in progress. Please wait and try again later.",
+        )
+    
     cookies = _load_cookies()
 
     if not cookies:
-        logger.warning("Cookies are empty — triggering recovery.")
+        logger.warning("⚠️ Cookies are empty — triggering recovery.")
         if not _recovery_in_progress:
             asyncio.create_task(_run_recovery())
         raise HTTPException(
@@ -182,8 +207,19 @@ async def trigger_refresh(background_tasks: BackgroundTasks):
 async def get_status():
     """Текущий статус: куки, валидность, recovery."""
     cookies = _load_cookies()
+    
+    # Проверяем критичные куки
+    critical_cookies = {"DMIR_AUTH", "remixsid"}
+    cookie_dict = {c["name"]: c["value"] for c in cookies}
+    
+    critical_status = {}
+    for name in critical_cookies:
+        value = cookie_dict.get(name, "")
+        critical_status[name] = "present" if value and value.strip() else "EMPTY"
+    
     return {
         "cookie_count": len(cookies),
+        "critical_cookies": critical_status,
         "last_check_valid": _last_check_result,
         "consecutive_failures": _consecutive_failures,
         "recovery_in_progress": _recovery_in_progress,

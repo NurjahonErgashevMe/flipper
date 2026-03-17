@@ -75,7 +75,7 @@ class QueueManager:
             url = await self.queue.get()
             
             try:
-                logger.info(f"[Worker {worker_id}] Processing: {url}")
+                logger.info(f"🔧 [Worker-{worker_id}] Взял из очереди: {url}")
 
                 # 1. Парсим данные
                 parsed_data: ParsedAdData = await self.parser.parse_async(url)
@@ -84,6 +84,7 @@ class QueueManager:
                 row = parse_to_sheets_row(parsed_data)
 
                 # 3. Сохраняем в Sheets (I/O в отдельном потоке)
+                logger.info(f"💾 [Worker-{worker_id}] Сохраняю в Google Sheets...")
                 loop = asyncio.get_event_loop()
                 success = await loop.run_in_executor(
                     None, 
@@ -93,18 +94,18 @@ class QueueManager:
                 )
 
                 if success:
-                    logger.info(f"[Worker {worker_id}] ✓ Saved {url}")
+                    logger.info(f"✅ [Worker-{worker_id}] Успешно сохранено: {url} | ID: {parsed_data.cian_id}")
                     self.processed_count += 1
                     
                     # Вызываем callback если есть
                     if self.on_data_parsed:
                         self.on_data_parsed(parsed_data)
                 else:
-                    logger.error(f"[Worker {worker_id}] Failed to save {url} to Sheets")
+                    logger.error(f"❌ [Worker-{worker_id}] Не удалось сохранить в Sheets: {url}")
                     self.error_count += 1
 
             except Exception as e:
-                logger.error(f"[Worker {worker_id}] Error processing {url}: {type(e).__name__}: {e}")
+                logger.error(f"❌ [Worker-{worker_id}] Ошибка при обработке {url}: {type(e).__name__}: {e}")
                 self.error_count += 1
 
             finally:
@@ -142,11 +143,13 @@ class QueueManager:
                 "success_rate": 0.0
             }
 
-        logger.info(f"Starting queue processing: {len(urls)} URLs, {self.concurrency} workers")
+        logger.info(f"🚀 Запускаю обработку очереди: {len(urls)} URLs, {self.concurrency} воркеров")
 
         # Добавляем все URLs в очередь
         for url in urls:
             await self.queue.put(url)
+        
+        logger.info(f"📋 Все {len(urls)} URLs добавлены в очередь")
 
         # Запускаем workers
         tasks = [
@@ -156,22 +159,24 @@ class QueueManager:
 
         try:
             # Ждем пока все URLs будут обработаны
+            logger.info(f"⏳ Ожидаю завершения обработки всех URLs...")
             await self.queue.join()
-            logger.info("Queue processing completed")
+            logger.info("✅ Обработка очереди завершена")
 
         except asyncio.CancelledError:
-            logger.warning("Queue processing cancelled")
+            logger.warning("⚠️ Обработка очереди отменена")
             raise
 
         finally:
             # Останавливаем workers
+            logger.info("🛑 Останавливаю воркеров...")
             for task in tasks:
                 task.cancel()
 
             # Ждем завершения всех tasks (с обработкой CancelledError)
             await asyncio.gather(*tasks, return_exceptions=True)
 
-            logger.info("Workers stopped")
+            logger.info("✅ Все воркеры остановлены")
 
         # Возвращаем статистику
         total = len(urls)
@@ -184,5 +189,5 @@ class QueueManager:
             "success_rate": round(success_rate, 2)
         }
 
-        logger.info(f"Queue statistics: {stats}")
+        logger.info(f"📊 Статистика: Всего={total} | Успешно={self.processed_count} | Ошибок={self.error_count} | Успех={success_rate:.1f}%")
         return stats
