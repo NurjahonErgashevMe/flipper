@@ -14,40 +14,40 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Добавляем папку сервиса в пути поиска Python, 
-# чтобы внутренние импорты парсера (например, from models import ...) работали без ошибок
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(current_dir, 'services', 'parser_cian'))
 
 from services.parser_cian.parser import AdParser
 
-# Загружаем переменные из .env
 load_dotenv()
 
-async def test_single_ad():
+async def test_statistics():
     if not os.getenv("FIRECRAWL_API_KEY"):
         logger.error("❌ Ошибка: FIRECRAWL_API_KEY не установлен в .env")
         return
 
-    # Подключаемся к менеджеру кук (он запущен в Docker и доступен на 8000 порту локалхоста)
     logger.info("🔌 Подключаемся к Cookie Manager...")
     parser = AdParser(cookie_manager_url="http://localhost:8000")
     
-    url = "https://www.cian.ru/sale/flat/326100259/"
-    logger.info(f"🧪 Тестируем полный парсинг (Firecrawl + Статистика + История цен)")
+    # Тестовый URL с историей цен
+    url = "https://www.cian.ru/sale/flat/327607745/"
+    
+    logger.info("\n" + "="*80)
+    logger.info("🧪 Тестируем полный парсинг с получением статистики")
     logger.info(f"📍 URL: {url}")
+    logger.info("="*80 + "\n")
     
     try:
         data = await parser.parse_async(url)
         
-        # Сохраняем данные в data.json
-        output_file = "data.json"
+        # Сохраняем данные
+        output_file = "test_statistics_result.json"
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(data.model_dump(), f, ensure_ascii=False, indent=2)
         logger.info(f"💾 Данные сохранены в {output_file}")
         
         logger.info("\n" + "="*80)
-        logger.info("✅ УСПЕШНО СПАРСИЛИ ДАННЫЕ!")
+        logger.info("✅ РЕЗУЛЬТАТ ПАРСИНГА")
         logger.info("="*80)
         
         # Основная информация
@@ -56,9 +56,6 @@ async def test_single_ad():
         logger.info(f"  💰 Цена: {data.price:,} руб." if data.price else "  💰 Цена: Не указана")
         logger.info(f"  📐 Площадь: {data.area} м²" if data.area else "  📐 Площадь: Не указана")
         logger.info(f"  🏠 Комнат: {data.rooms}" if data.rooms else "  🏠 Комнат: Не указано")
-        logger.info(f"  🚇 Метро: {data.address.metro_station if data.address and data.address.metro_station else 'Нет данных'}")
-        logger.info(f"  🚶 До метро: {data.metro_walk_time} мин" if data.metro_walk_time else "  🚶 До метро: Не указано")
-        logger.info(f"  🏢 Этаж: {data.floor_info.current}/{data.floor_info.all}" if data.floor_info and data.floor_info.current and data.floor_info.all else "  🏢 Этаж: Не указано")
         
         # Статистика
         logger.info(f"\n📊 Статистика:")
@@ -87,13 +84,14 @@ async def test_single_ad():
                     f"{change_emoji} {entry.change_type}{change_str}"
                 )
         else:
-            logger.info("\nℹ️ История цен отсутствует (цена не менялась)")
+            logger.info("\nℹ️ История цен отсутствует")
         
         logger.info("\n" + "="*80)
         logger.info("✅ ТЕСТ ЗАВЕРШЕН УСПЕШНО!")
         logger.info("="*80)
+        
     except Exception as e:
         logger.error(f"\n❌ ПРОВАЛ ПАРСИНГА: {type(e).__name__}: {e}", exc_info=True)
 
 if __name__ == "__main__":
-    asyncio.run(test_single_ad())
+    asyncio.run(test_statistics())

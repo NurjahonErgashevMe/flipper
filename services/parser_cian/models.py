@@ -5,8 +5,8 @@ services.parser_cian.models - Pydantic models for Cian real estate ads
 Абстрактны от способа хранения (Google Sheets и т.д).
 """
 
-from pydantic import BaseModel, Field
-from typing import Optional, List, Any, Literal
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional, List, Any, Literal, Union
 from datetime import datetime
 
 
@@ -146,20 +146,28 @@ class ParsedAdData(BaseModel):
     # Статистика
     publish_date: Optional[str] = Field(
         None,
-        description="Дата публикации объявления.",
+        description="Дата публикации объявления (формат: YYYY-MM-DD).",
     )
-    days_in_exposition: Optional[str] = Field(
+    days_in_exposition: Optional[int] = Field(
         None,
         description="Дней объявление в каталоге.",
     )
-    total_views: Optional[str] = Field(
+    total_views: Optional[int] = Field(
         None,
         description="Всего просмотров.",
     )
-    unique_views: Optional[str] = Field(
+    unique_views: Optional[int] = Field(
         None,
-        description="Уникальных просмотров.",
+        description="Уникальных просмотров (сегодня).",
     )
+
+    # Валидаторы для преобразования "soon" в None
+    @field_validator('days_in_exposition', 'total_views', 'unique_views', mode='before')
+    @classmethod
+    def convert_soon_to_none(cls, v):
+        if v == "soon":
+            return None
+        return v
 
     # История цен
     price_history: Optional[List[PriceHistoryEntry]] = Field(

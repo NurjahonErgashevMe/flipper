@@ -34,7 +34,7 @@
     },
     {
       "date": "2 мар 2026",
-      "price": 22_500_000,
+      "price": 22500000,
       "change_amount": 100000,
       "change_type": "decrease"
     },

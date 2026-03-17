@@ -9,7 +9,9 @@ import os
 import logging
 import httpx
 import asyncio
-from typing import Dict, Any
+import re
+from typing import Dict, Any, Tuple, Optional
+from datetime import datetime, timedelta
 from models import ParsedAdData
 
 logger = logging.getLogger(__name__)
@@ -144,6 +146,212 @@ class AdParser:
         except Exception as e:
             logger.error(f"Failed to trigger recovery check: {e}")
 
+    def _extract_creation_date_from_html(self, html: str) -> Optional[str]:
+        """
+        Извлекает creationDate из HTML страницы.
+        
+        Args:
+            html: HTML контент страницы
+            
+        Returns:
+            Дата создания в формате YYYY-MM-DD или None
+        """
+        try:
+            # Ищем creationDate в HTML (обычно в JSON внутри script тега)
+            # Паттерн: "creationDate":"2026-03-08T22:35:02.89" или "creationDate": "2026-03-08T22:35:02.89"
+            patterns = [
+                r'"creationDate"\s*:\s*"(\d{4}-\d{2}-\d{2})T[^"]*"',  # С T и временем
+                r'"creationDate"\s*:\s*"(\d{4}-\d{2}-\d{2})"',  # Только дата
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, html)
+                if match:
+                    creation_date_str = match.group(1)
+                    logger.info(f"✅ Найдена creationDate: {creation_date_str}")
+                    logger.info(f"📅 Используем дату для API: {creation_date_str}")
+                    return creation_date_str
+            
+            logger.warning("⚠️ creationDate не найден в HTML")
+            logger.debug(f"HTML preview (first 500 chars): {html[:500]}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка извлечения creationDate: {e}")
+            return None
+
+    async def _get_statistics(self, cian_id: str, creation_date: str, cookies_str: str) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+        """
+        Получает статистику просмотров объявления из Cian API.
+        
+        Args:
+            cian_id: ID объявления на Cian
+            creation_date: Дата создания - 1 день (формат: YYYY-MM-DD)
+            cookies_str: Строка с куками
+            
+        Returns:
+            Tuple: (days_in_exposition, total_views, unique_views)
+            
+        Raises:
+            Exception: Если не удалось получить статистику
+        """
+        url = f"https://api.cian.ru/offer-card/v1/get-offer-card-statistic/?offerCreationDate={creation_date}&offerId={cian_id}"
+        
+        headers = {
+            "accept": "*/*",
+            "accept-language": "en,ru;q=0.9,en-US;q=0.8",
+            "origin": "https://www.cian.ru",
+            "referer": "https://www.cian.ru/",
+            "sec-ch-ua": '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-site",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+            "Cookie": cookies_str
+        }
+        
+        logger.info(f"📊 Получаем статистику для объявления {cian_id} (creation_date: {creation_date})...")
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                
+                if response.status_code != 200:
+                    logger.warning(f"⚠️ Статистика API вернул {response.status_code}")
+                    return None, None, None, None
+                
+                data = response.json()
+
+                # helper: parse numbers and dates from localized strings
+                def _parse_number_from_string(s: str) -> Optional[int]:
+                    if not s:
+                        return None
+                    m = re.search(r"(\d+[\d\s\u00A0]*)", s)
+                    if not m:
+                        return None
+                    # remove spaces and non-breaking spaces
+                    num = re.sub(r"[\s\u00A0]", "", m.group(1))
+                    try:
+                        return int(num)
+                    except Exception:
+                        return None
+
+                def _parse_date_from_string(s: str) -> Optional[datetime]:
+                    if not s:
+                        return None
+                    # look for dd.mm.yyyy
+                    m = re.search(r"(\d{2}\.\d{2}\.\d{4})", s)
+                    if m:
+                        try:
+                            return datetime.strptime(m.group(1), "%d.%m.%Y")
+                        except Exception:
+                            pass
+                    # look for iso date yyyy-mm-dd
+                    m2 = re.search(r"(\d{4}-\d{2}-\d{2})", s)
+                    if m2:
+                        try:
+                            return datetime.strptime(m2.group(1), "%Y-%m-%d")
+                        except Exception:
+                            pass
+                    return None
+
+                # Проверяем наличие daily и dailyViews
+                daily = data.get("daily", {}) or {}
+                daily_views = daily.get("dailyViews") or []
+
+                if not daily_views:
+                    logger.warning("⚠️ Массив dailyViews пустой или отсутствует")
+
+                # Собираем все даты и views из dailyViews (если есть)
+                parsed_entries = []
+                for entry in daily_views:
+                    date_raw = entry.get("date")
+                    views = entry.get("views")
+                    dt = None
+                    if isinstance(date_raw, str):
+                        try:
+                            dt = datetime.strptime(date_raw, "%Y-%m-%d")
+                        except Exception:
+                            dt = _parse_date_from_string(date_raw)
+                    if dt and isinstance(views, int):
+                        parsed_entries.append((dt.date(), views))
+
+                publish_date_from_daily = None
+                days_in_exposition = None
+                unique_views = None
+                total_views = None
+
+                # Determine total_views: prefer top-level totalViews string if present
+                root_total_views_str = data.get("totalViews")
+                root_total, root_total_date = None, None
+                if isinstance(root_total_views_str, str):
+                    root_total = _parse_number_from_string(root_total_views_str)
+                    dt = _parse_date_from_string(root_total_views_str)
+                    if dt:
+                        root_total_date = dt.date()
+
+                # daily total string may be informative
+                daily_total_views_str = daily.get("totalViews")
+                daily_total = None
+                if isinstance(daily_total_views_str, str):
+                    daily_total = _parse_number_from_string(daily_total_views_str)
+
+                # If we have parsed entries, compute earliest/latest and totals
+                if parsed_entries:
+                    dates = [d for d, _ in parsed_entries]
+                    earliest = min(dates)
+                    latest = max(dates)
+                    publish_date_from_daily = earliest
+                    # days between earliest and latest (non-negative)
+                    days_in_exposition = max(0, (latest - earliest).days)
+                    # unique views for latest day
+                    # find entry with latest date
+                    for d, v in parsed_entries:
+                        if d == latest:
+                            unique_views = v
+                            break
+                    # total views: prefer root_total, then daily_total, then sum of parsed
+                    if root_total is not None:
+                        total_views = root_total
+                    elif daily_total is not None:
+                        total_views = daily_total
+                    else:
+                        total_views = sum(v for _, v in parsed_entries)
+
+                else:
+                    # No parsed daily entries - try to fall back to strings
+                    if root_total is not None:
+                        total_views = root_total
+                    elif daily_total is not None:
+                        total_views = daily_total
+
+                # If root_total_date present, use it as publish date override
+                publish_date = None
+                if root_total_date:
+                    publish_date = root_total_date
+                    # compute days_in_exposition against latest (if available) or today
+                    ref_date = None
+                    if parsed_entries:
+                        ref_date = max(d for d, _ in parsed_entries)
+                    else:
+                        ref_date = datetime.utcnow().date()
+                    days_in_exposition = max(0, (ref_date - publish_date).days)
+                elif publish_date_from_daily:
+                    publish_date = publish_date_from_daily
+
+                logger.info("✅ Статистика получена:")
+                logger.info(f"   📆 Дней в экспозиции: {days_in_exposition}")
+                logger.info(f"   👁️ Всего просмотров: {total_views}")
+                logger.info(f"   🔍 Уникальных просмотров (сегодня): {unique_views}")
+
+                return days_in_exposition, total_views, unique_views
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения статистики: {e}")
+            return None, None, None, None
+
     def _get_schema(self) -> Dict[str, Any]:
         """
         JSON Schema для структурированной экстракции данных объявления.
@@ -238,12 +446,12 @@ class AdParser:
                             },
                             "change_amount": {
                                 "type": "integer",
-                                "description": "На сколько изменилась цена по сравнению с предыдущей (0 для первой публикации)"
+                                "description": "На сколько изменилась цена по сравнению с предыдущей (может быть отрицательным для decrease). Для первой записи = 0."
                             },
                             "change_type": {
                                 "type": "string",
                                 "enum": ["initial", "decrease", "increase"],
-                                "description": "Тип: 'initial' (первая цена), 'decrease' (снижение), 'increase' (повышение)"
+                                "description": "Тип изменения цены: 'initial' (первая публикация), 'decrease' (цена снизилась - зелёная стрелка вниз), 'increase' (цена повысилась - красная стрелка вверх). Если текущая цена МЕНЬШЕ предыдущей - это decrease. Если текущая цена БОЛЬШЕ предыдущей - это increase."
                             }
                         },
                         "required": ["date", "price", "change_amount", "change_type"]
@@ -281,13 +489,14 @@ class AdParser:
         payload = {
             "url": url,
             "formats": [
+                "html",  # Обработанный HTML (может содержать creationDate)
+                "rawHtml",  # Оригинальный HTML со скриптами
                 {
                     "type": "json",
                     "schema": self._get_schema()
                 }
             ],
             "waitFor": 0,
-            "onlyMainContent": True,
             "headers": {
                 "Cookie": cookies_str
             } if cookies_str else {}
@@ -318,7 +527,24 @@ class AdParser:
                 logger.warning(f"Firecrawl returned success=false for {url}")
                 raise ValueError("Firecrawl API returned success=false")
 
-            if "data" not in result or "json" not in result.get("data", {}):
+            if "data" not in result:
+                logger.warning(f"No data in Firecrawl response for {url}")
+                raise ValueError("No data in Firecrawl response")
+            
+            data_obj = result["data"]
+            
+            # Извлекаем HTML для получения creationDate
+            # Сначала пробуем rawHtml (там точно есть скрипты), потом html
+            creation_date = None
+            for html_key in ["rawHtml", "html"]:
+                html_content = data_obj.get(html_key, "")
+                if html_content:
+                    creation_date = self._extract_creation_date_from_html(html_content)
+                    if creation_date:
+                        break
+            
+            # Проверяем наличие JSON данных
+            if "json" not in data_obj:
                 # Если данных нет, может быть проблема с сессией
                 logger.warning(f"No JSON data extracted for {url}, checking authentication...")
                 
@@ -331,14 +557,41 @@ class AdParser:
                 
                 raise ValueError("No JSON data extracted")
 
-            extracted_data = result["data"]["json"]
+            extracted_data = data_obj["json"]
             extracted_data["url"] = url
             
-            # Устанавливаем значения "soon" для полей, которые не парсим через Firecrawl
-            extracted_data["publish_date"] = "soon"
-            extracted_data["days_in_exposition"] = "soon"
-            extracted_data["total_views"] = "soon"
-            extracted_data["unique_views"] = "soon"
+            # Получаем cian_id для запроса статистики
+            cian_id = extracted_data.get("cian_id")
+            
+            if cian_id and creation_date:
+                # Вычитаем 1 день из creationDate для API
+                # API ожидает дату ДО первого дня публикации
+                creation_date_obj = datetime.strptime(creation_date, "%Y-%m-%d")
+                api_date = (creation_date_obj - timedelta(days=1)).strftime("%Y-%m-%d")
+                logger.info(f"📅 Отправляем в API дату: {api_date} (creationDate - 1 день)")
+                
+                # Получаем статистику просмотров
+                days_in_exposition, total_views, unique_views = await self._get_statistics(
+                    cian_id, api_date, cookies_str
+                )
+                
+                # Обновляем данные
+                extracted_data["publish_date"] = creation_date
+                extracted_data["days_in_exposition"] = days_in_exposition
+                extracted_data["total_views"] = total_views
+                extracted_data["unique_views"] = unique_views
+            elif not cian_id:
+                logger.warning("⚠️ cian_id не найден, пропускаем получение статистики")
+                extracted_data["publish_date"] = None
+                extracted_data["days_in_exposition"] = None
+                extracted_data["total_views"] = None
+                extracted_data["unique_views"] = None
+            elif not creation_date:
+                logger.warning("⚠️ creationDate не найден в HTML, пропускаем получение статистики")
+                extracted_data["publish_date"] = None
+                extracted_data["days_in_exposition"] = None
+                extracted_data["total_views"] = None
+                extracted_data["unique_views"] = None
 
             # Преобразуем плоский JSON в вложенные Pydantic модели
             normalized = self._normalize_data(extracted_data)
@@ -387,5 +640,83 @@ class AdParser:
             result["address"] = address_data
         if floor_data:
             result["floor_info"] = floor_data
+
+        # Нормализуем историю цен если она есть: гарантируем порядок newest->oldest
+        # и корректно вычисляем change_amount (abs diff) и change_type.
+        ph = flat_data.get("price_history")
+        if ph and isinstance(ph, list):
+            parsed = []
+            for idx, entry in enumerate(ph):
+                d_str = entry.get("date")
+                p = entry.get("price")
+                parsed_date = None
+                if isinstance(d_str, str):
+                    try:
+                        parsed_date = datetime.strptime(d_str, "%Y-%m-%d")
+                    except Exception:
+                        try:
+                            months = {
+                                'янв':1,'фев':2,'мар':3,'апр':4,'май':5,'мая':5,'июн':6,
+                                'июл':7,'авг':8,'сен':9,'окт':10,'ноя':11,'дек':12
+                            }
+                            parts = d_str.strip().split()
+                            if len(parts) >= 3:
+                                day = int(parts[0])
+                                mon_raw = parts[1].lower()[:3]
+                                year = int(parts[2])
+                                mon = months.get(mon_raw)
+                                if mon:
+                                    parsed_date = datetime(year, mon, day)
+                        except Exception:
+                            parsed_date = None
+                parsed.append({
+                    "orig_index": idx,
+                    "date_str": d_str,
+                    "date": parsed_date.date() if parsed_date else None,
+                    "price": int(p) if isinstance(p, (int, float)) else None,
+                    "raw": entry,
+                })
+
+            # Filter out entries without price
+            parsed = [e for e in parsed if e.get("price") is not None]
+
+            if parsed:
+                # determine if list is newest->oldest or oldest->newest by inspecting parsed dates
+                dated = [e for e in parsed if e.get("date") is not None]
+                order_desc = True
+                if dated and len(dated) >= 2:
+                    dates = [e["date"] for e in dated]
+                    # if first date < second date -> ascending -> not desc
+                    if dates[0] < dates[1]:
+                        order_desc = False
+
+                # build list in newest->oldest order for computing changes
+                if order_desc:
+                    seq = parsed
+                else:
+                    seq = list(reversed(parsed))
+
+                # compute changes: for each entry in seq (newest->oldest) compare to next (older)
+                out = []
+                for i, item in enumerate(seq):
+                    cur_price = item["price"]
+                    if i + 1 < len(seq):
+                        prev_price = seq[i+1]["price"]
+                        diff = abs(cur_price - prev_price)
+                        change_type = "decrease" if cur_price < prev_price else ("increase" if cur_price > prev_price else "initial")
+                        change_amount = diff
+                    else:
+                        change_type = "initial"
+                        change_amount = 0
+
+                    out.append({
+                        "date": item.get("date_str") or (item.get("date").strftime("%Y-%m-%d") if item.get("date") else None),
+                        "price": cur_price,
+                        "change_amount": change_amount,
+                        "change_type": change_type,
+                    })
+
+                # ensure output order is newest->oldest (as in UI)
+                result["price_history"] = out
 
         return result
