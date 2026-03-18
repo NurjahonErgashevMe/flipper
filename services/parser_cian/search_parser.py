@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def extract_ad_urls_from_search(
     search_url: str,
     location: str = "Москва",
-    max_urls: int = 3,
+    max_urls_per_search: int = 3,
     http_proxy: str = None
 ) -> List[str]:
     """
@@ -24,7 +24,7 @@ def extract_ad_urls_from_search(
     Args:
         search_url: URL поисковой страницы (например, с фильтрами)
         location: Город (по умолчанию "Москва")
-        max_urls: Сколько первых ссылок вернуть (по умолчанию 3)
+        max_urls_per_search: Сколько первых ссылок вернуть (по умолчанию 3)
         http_proxy: URL прокси (если нужно)
         
     Returns:
@@ -85,8 +85,8 @@ def extract_ad_urls_from_search(
         
         logger.info(f"Found {len(all_urls)} ad URLs on search page")
         
-        # Возвращаем первые max_urls
-        extracted = all_urls[:max_urls]
+        # Возвращаем первые max_urls_per_search
+        extracted = all_urls[:max_urls_per_search]
         logger.info(f"Returning top {len(extracted)} URLs: {extracted}")
         
         return extracted
@@ -132,7 +132,7 @@ def extract_batch_from_searches(
             urls = extract_ad_urls_from_search(
                 search_url=search_url,
                 location=location,
-                max_urls=max_urls_per_search,
+                max_urls_per_search=max_urls_per_search,
                 http_proxy=http_proxy
             )
             all_ad_urls.extend(urls)

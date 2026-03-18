@@ -17,7 +17,7 @@ from packages.flipper_core.utils import log_section
 from services.parser_cian.config import settings, validate_config
 from services.parser_cian.parser import AdParser
 from services.parser_cian.queue_manager import QueueManager
-from services.parser_cian.search_parser import extract_ad_urls_from_search
+from services.parser_cian.search_parser import extract_batch_from_searches
 
 # Настройка логирования
 logging.basicConfig(
@@ -78,26 +78,13 @@ async def main():
         # === STEP 4: Extract Ad URLs from Search Pages ===
         log_section("Step 4: Extracting Ad URLs from Search Pages")
         
-        all_ad_urls = []
-        for i, search_url in enumerate(search_urls, 1):
-            logger.info(f"📋 Processing category {i}/{len(search_urls)}...")
-            logger.info(f"   URL: {search_url[:100]}...")
-            
-            try:
-                # Извлекаем первые 3 объявления из каждой категории
-                ad_urls = extract_ad_urls_from_search(
-                    search_url=search_url,
-                    location="Москва",
-                    max_urls=1,
-                    http_proxy=settings.http_proxy if settings.http_proxy else None
-                )
-                
-                logger.info(f"   ✓ Extracted {len(ad_urls)} ad URLs from category {i}")
-                all_ad_urls.extend(ad_urls)
-                
-            except Exception as e:
-                logger.error(f"   ❌ Failed to extract ads from category {i}: {e}")
-                continue
+        logger.info(f"Extracting ad URLs from {len(search_urls)} search pages...")
+        all_ad_urls = extract_batch_from_searches(
+            search_urls=search_urls,
+            location="Москва",
+            max_urls_per_search=1,
+            http_proxy=settings.http_proxy if settings.http_proxy else None
+        )
         
         if not all_ad_urls:
             logger.warning("No ad URLs extracted from any category")

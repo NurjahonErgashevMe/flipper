@@ -87,10 +87,8 @@ class QueueManager:
                 logger.info(f"💾 [Worker-{worker_id}] Сохраняю в Google Sheets...")
                 loop = asyncio.get_event_loop()
                 success = await loop.run_in_executor(
-                    None, 
-                    self.sheets_manager.write_row, 
-                    "PARSED",
-                    row
+                    None,
+                    lambda: self.sheets_manager.write_row("PARSED", row, insert_at_top=True)
                 )
 
                 if success:

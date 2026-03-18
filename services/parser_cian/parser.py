@@ -12,7 +12,7 @@ import asyncio
 import re
 from typing import Dict, Any, Tuple, Optional
 from datetime import datetime, timedelta
-from models import ParsedAdData
+from services.parser_cian.models import ParsedAdData
 
 logger = logging.getLogger(__name__)
 

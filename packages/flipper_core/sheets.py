@@ -89,77 +89,88 @@ class SheetsManager:
             raise
 
     def write_row(
-        self, 
-        tab_name: str, 
+        self,
+        tab_name: str,
         row: List[Any],
         clear_format: bool = False,
-        insert_at_top: bool = True
+        insert_at_top: bool = True,
     ) -> bool:
-        """
-        Добавляет одну строку в таблицу.
-        
+        """Добавляет одну строку в таблицу.
+
+        Важно: вставка "наверх" через insertDimension + update в A2.
+        Это надежнее, чем values.append, который всегда добавляет вниз.
+
         Args:
             tab_name: Название табы (например "RESULTS", "PARSED")
             row: Список значений для строки
-            clear_format: Если True, игнорирует форматирование ячеек
+            clear_format: Если True, игнорирует форматирование ячеек (пока не используется)
             insert_at_top: Если True, вставляет строку после заголовка (строка 2)
-            
+
         Returns:
             True если успешно, False если ошибка
         """
         try:
             if insert_at_top:
-                # Вставляем пустую строку после заголовка
+                sheet_id = self._get_sheet_id(tab_name)
+                logger.info(f"Inserting row at top of {tab_name} (sheet_id={sheet_id})")
+
+                # 1) Вставляем новую строку на позицию 2 (index=1)
                 self.service.spreadsheets().batchUpdate(
                     spreadsheetId=self.spreadsheet_id,
                     body={
-                        "requests": [{
-                            "insertDimension": {
-                                "range": {
-                                    "sheetId": self._get_sheet_id(tab_name),
-                                    "dimension": "ROWS",
-                                    "startIndex": 1,
-                                    "endIndex": 2
-                                },
-                                "inheritFromBefore": False
+                        "requests": [
+                            {
+                                "insertDimension": {
+                                    "range": {
+                                        "sheetId": sheet_id,
+                                        "dimension": "ROWS",
+                                        "startIndex": 1,
+                                        "endIndex": 2,
+                                    },
+                                    "inheritFromBefore": False,
+                                }
                             }
-                        }]
-                    }
+                        ]
+                    },
                 ).execute()
-                # Записываем данные в новую строку 2
+                logger.info(f"✓ Inserted empty row at position 2")
+
+                # 2) Пишем значения в A2
                 body = {"values": [row]}
                 result = (
                     self.sheet.values()
                     .update(
                         spreadsheetId=self.spreadsheet_id,
-                        range=f"{tab_name}!A2:Z2",
+                        range=f"{tab_name}!A2",
                         valueInputOption="USER_ENTERED",
                         body=body,
                     )
                     .execute()
                 )
-                success = "updatedRows" in result and result["updatedRows"] > 0
-            else:
-                body = {"values": [row]}
-                result = (
-                    self.sheet.values()
-                    .append(
-                        spreadsheetId=self.spreadsheet_id,
-                        range=f"{tab_name}!A:Z",
-                        valueInputOption="USER_ENTERED",
-                        insertDataOption="INSERT_ROWS",
-                        body=body,
-                    )
-                    .execute()
+
+                updated = result.get("updatedRows", 0)
+                if updated > 0:
+                    logger.info(f"✓ Wrote data to A2, {updated} rows updated")
+                return updated > 0
+
+            # insert_at_top=False -> обычный append вниз
+            body = {"values": [row]}
+            result = (
+                self.sheet.values()
+                .append(
+                    spreadsheetId=self.spreadsheet_id,
+                    range=f"{tab_name}!A:Z",
+                    valueInputOption="USER_ENTERED",
+                    insertDataOption="INSERT_ROWS",
+                    body=body,
                 )
-                success = "updates" in result and result["updates"]["updatedRows"] > 0
-            
-            if success:
-                logger.debug(f"Wrote 1 row to {tab_name}")
-            return success
-            
+                .execute()
+            )
+            updates = result.get("updates", {}) or {}
+            return (updates.get("updatedRows", 0) or 0) > 0
+
         except Exception as e:
-            logger.error(f"Failed to write row to Google Sheets: {e}")
+            logger.error(f"Failed to write row to Google Sheets: {e}", exc_info=True)
             return False
 
     def _get_sheet_id(self, tab_name: str) -> int:
@@ -168,9 +179,9 @@ class SheetsManager:
             sheet_metadata = self.service.spreadsheets().get(
                 spreadsheetId=self.spreadsheet_id
             ).execute()
-            for sheet in sheet_metadata.get('sheets', []):
-                if sheet['properties']['title'] == tab_name:
-                    return sheet['properties']['sheetId']
+            for sheet in sheet_metadata.get("sheets", []):
+                if sheet["properties"]["title"] == tab_name:
+                    return sheet["properties"]["sheetId"]
             raise ValueError(f"Sheet '{tab_name}' not found")
         except Exception as e:
             logger.error(f"Failed to get sheet ID: {e}")

@@ -7,7 +7,9 @@ services.parser_cian.models - Pydantic models for Cian real estate ads
 
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Any, Literal, Union
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+MSK = timezone(timedelta(hours=3))
 
 
 class AddressInfo(BaseModel):
@@ -177,7 +179,7 @@ class ParsedAdData(BaseModel):
 
     # Служебные поля
     parsed_at: datetime = Field(
-        default_factory=datetime.now,
+        default_factory=lambda: datetime.now(),
         description="Когда данные были распарсены.",
     )
 
@@ -224,7 +226,9 @@ def parse_to_sheets_row(data: ParsedAdData) -> List[Any]:
         floor_str = f"{curr}/{total}" if curr and total else (str(curr) if curr else "")
 
     # Форматируем дату для Google Sheets
-    parsed_at_str = data.parsed_at.strftime("%Y-%m-%d %H:%M:%S")
+    # Google Sheets API принимает строку в формате ISO или дату как строку.
+    # Используем формат "YYYY-MM-DD HH:MM:SS" который Google Sheets распознает как дату.
+    parsed_at_str = datetime.now(MSK).strftime("%Y-%m-%d %H:%M:%S")
 
     # Собираем строку согласно схеме Google Sheets
     return [
@@ -249,5 +253,5 @@ def parse_to_sheets_row(data: ParsedAdData) -> List[Any]:
         data.total_views or "",                            # S: Всего просмотров
         data.unique_views or "",                           # T: Уникальных просмотров
         data.cian_id or "",                                # U: ID Cian
-        parsed_at_str,                                     # V: Время парсинга
+        parsed_at_str,                                     # V: Время парсинга (строка в формате YYYY-MM-DD HH:MM:SS)
     ]
