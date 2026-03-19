@@ -97,13 +97,13 @@ class SheetsManager:
         except Exception as e:
             logger.error(f"Failed to read URLs from Google Sheets: {e}")
             raise
-
     def write_row(
         self,
         tab_name: str,
         row: List[Any],
         clear_format: bool = False,
         insert_at_top: bool = True,
+        bg_color: dict = None,
     ) -> bool:
         """Добавляет одну строку в таблицу.
 
@@ -115,6 +115,7 @@ class SheetsManager:
             row: Список значений для строки
             clear_format: Если True, игнорирует форматирование ячеек (пока не используется)
             insert_at_top: Если True, вставляет строку после заголовка (строка 2)
+            bg_color: Dict с цветом заливки (rgb), например {"red": 1.0, "green": 0.0, "blue": 0.0}
 
         Returns:
             True если успешно, False если ошибка
@@ -124,78 +125,215 @@ class SheetsManager:
                 sheet_id = self._get_sheet_id(tab_name)
                 logger.info(f"Inserting row at top of {tab_name} (sheet_id={sheet_id})")
 
-                # 1) Вставляем новую строку на позицию 2 (index=1)
-                self.service.spreadsheets().batchUpdate(
-                    spreadsheetId=self.spreadsheet_id,
-                    body={
-                        "requests": [
-                            {
-                                "insertDimension": {
-                                    "range": {
-                                        "sheetId": sheet_id,
-                                        "dimension": "ROWS",
-                                        "startIndex": 1,
-                                        "endIndex": 2,
-                                    },
-                                    "inheritFromBefore": False,
+                requests = [
+                    {
+                        "insertDimension": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "dimension": "ROWS",
+                                "startIndex": 1,
+                                "endIndex": 2,
+                            },
+                            "inheritFromBefore": False,
+                        }
+                    }
+                ]
+
+                # Всегда обновляем цвет, чтобы сбросить унаследованный цвет от строки ниже
+                bg_color_dict = bg_color if bg_color else {"red": 1.0, "green": 1.0, "blue": 1.0}
+                
+                requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1,
+                            "endRowIndex": 2,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "backgroundColor": {
+                                    "red": bg_color_dict.get("red", 1.0),
+                                    "green": bg_color_dict.get("green", 1.0),
+                                    "blue": bg_color_dict.get("blue", 1.0)
                                 }
                             }
-                        ]
-                    },
-                ).execute()
-                logger.info(f"✓ Inserted empty row at position 2")
+                        },
+                        "fields": "userEnteredFormat.backgroundColor"
+                    }
+                })
 
-                # 2) Пишем значения в A2
-                body = {"values": [row]}
-                result = (
-                    self.sheet.values()
-                    .update(
-                        spreadsheetId=self.spreadsheet_id,
-                        range=f"{tab_name}!A2",
-                        valueInputOption="USER_ENTERED",
-                        body=body,
-                    )
-                    .execute()
-                )
-
-                updated = result.get("updatedRows", 0)
-                if updated > 0:
-                    logger.info(f"✓ Wrote data to A2, {updated} rows updated")
-                return updated > 0
+                import time
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        # 1) Вставляем новую строку на позицию 2 (index=1) и красим если нужно
+                        self.service.spreadsheets().batchUpdate(
+                            spreadsheetId=self.spreadsheet_id,
+                            body={"requests": requests},
+                        ).execute()
+                        logger.info(f"✓ Inserted empty row at position 2")
+        
+                        # 2) Пишем значения в A2
+                        body = {"values": [row]}
+                        result = (
+                            self.sheet.values()
+                            .update(
+                                spreadsheetId=self.spreadsheet_id,
+                                range=f"{tab_name}!A2",
+                                valueInputOption="USER_ENTERED",
+                                body=body,
+                            )
+                            .execute()
+                        )
+        
+                        updated = result.get("updatedRows", 0)
+                        if updated > 0:
+                            logger.info(f"✓ Wrote data to A2, {updated} rows updated")
+                        return updated > 0
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Failed to write row (attempt {attempt+1}/{max_retries}): {e}. Retrying...")
+                            time.sleep(1)
+                        else:
+                            raise e
 
             # insert_at_top=False -> обычный append вниз
-            body = {"values": [row]}
-            result = (
-                self.sheet.values()
-                .append(
-                    spreadsheetId=self.spreadsheet_id,
-                    range=f"{tab_name}!A:Z",
-                    valueInputOption="USER_ENTERED",
-                    insertDataOption="INSERT_ROWS",
-                    body=body,
-                )
-                .execute()
-            )
-            updates = result.get("updates", {}) or {}
-            return (updates.get("updatedRows", 0) or 0) > 0
+            import time
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    body = {"values": [row]}
+                    result = (
+                        self.sheet.values()
+                        .append(
+                            spreadsheetId=self.spreadsheet_id,
+                            range=f"{tab_name}!A:Z",
+                            valueInputOption="USER_ENTERED",
+                            insertDataOption="INSERT_ROWS",
+                            body=body,
+                        )
+                        .execute()
+                    )
+                    updates = result.get("updates", {}) or {}
+                    return (updates.get("updatedRows", 0) or 0) > 0
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Failed to append row (attempt {attempt+1}/{max_retries}): {e}. Retrying...")
+                        time.sleep(1)
+                    else:
+                        raise e
 
         except Exception as e:
             logger.error(f"Failed to write row to Google Sheets: {e}", exc_info=True)
             return False
 
+    def find_and_update_row(
+        self,
+        tab_name: str,
+        row: List[Any],
+        id_value: str,
+        id_column_index: int = 0,
+        bg_color: dict = None
+    ) -> bool:
+        """Ищет строку по ID в указанной колонке и обновляет её.
+        Если не находит - вставляет новую наверх.
+
+        Args:
+            tab_name: Название табы
+            row: Данные строки
+            id_value: Значение ID для поиска (например cian_id)
+            id_column_index: Индекс колонки с ID (0 = A)
+            bg_color: Цвет фона для обновления
+
+        Returns:
+            True если успешно
+        """
+        try:
+            # 1. Сначала пытаемся найти строку
+            result = self.sheet.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"{tab_name}!A:Z"
+            ).execute()
+            
+            values = result.get("values", [])
+            row_index = -1
+            
+            # Пропускаем первую строку (заголовок)
+            for i, existing_row in enumerate(values):
+                if i == 0: continue
+                if len(existing_row) > id_column_index and str(existing_row[id_column_index]) == str(id_value):
+                    row_index = i + 1 # 1-based index
+                    break
+            
+            if row_index != -1:
+                # 2. Нашли! Обновляем существующую
+                logger.info(f"Found existing row for {id_value} at index {row_index} in {tab_name}. Updating...")
+                
+                # Обновляем значения
+                body = {"values": [row]}
+                self.sheet.values().update(
+                    spreadsheetId=self.spreadsheet_id,
+                    range=f"{tab_name}!A{row_index}",
+                    valueInputOption="USER_ENTERED",
+                    body=body
+                ).execute()
+                
+                # Обновляем цвет: если bg_color не задан, сбрасываем в белый
+                bg_color_dict = bg_color if bg_color else {"red": 1.0, "green": 1.0, "blue": 1.0}
+                sheet_id = self._get_sheet_id(tab_name)
+                requests = [{
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": row_index - 1,
+                            "endRowIndex": row_index,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "backgroundColor": {
+                                    "red": bg_color_dict.get("red", 1.0),
+                                    "green": bg_color_dict.get("green", 1.0),
+                                    "blue": bg_color_dict.get("blue", 1.0)
+                                }
+                            }
+                        },
+                        "fields": "userEnteredFormat.backgroundColor"
+                    }
+                }]
+                self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=self.spreadsheet_id,
+                    body={"requests": requests}
+                ).execute()
+                
+                return True
+            else:
+                # 3. Не нашли - вставляем новую наверх
+                return self.write_row(tab_name, row, insert_at_top=True, bg_color=bg_color)
+                
+        except Exception as e:
+            logger.error(f"Failed to find_and_update_row for {id_value} in {tab_name}: {e}")
+            return False
+
     def _get_sheet_id(self, tab_name: str) -> int:
         """Получает ID листа по имени"""
-        try:
-            sheet_metadata = self.service.spreadsheets().get(
-                spreadsheetId=self.spreadsheet_id
-            ).execute()
-            for sheet in sheet_metadata.get("sheets", []):
-                if sheet["properties"]["title"] == tab_name:
-                    return sheet["properties"]["sheetId"]
-            raise ValueError(f"Sheet '{tab_name}' not found")
-        except Exception as e:
-            logger.error(f"Failed to get sheet ID: {e}")
-            raise
+        import time
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                sheet_metadata = self.service.spreadsheets().get(
+                    spreadsheetId=self.spreadsheet_id
+                ).execute()
+                for sheet in sheet_metadata.get("sheets", []):
+                    if sheet["properties"]["title"] == tab_name:
+                        return sheet["properties"]["sheetId"]
+                raise ValueError(f"Sheet '{tab_name}' not found")
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Failed to get sheet ID (attempt {attempt+1}/{max_retries}): {e}. Retrying...")
+                    time.sleep(1)
+                else:
+                    logger.error(f"Failed to get sheet ID: {e}")
+                    raise
 
     def write_rows(
         self, 

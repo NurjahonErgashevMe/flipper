@@ -706,9 +706,13 @@ class AdParser:
                     cur_price = item["price"]
                     if i + 1 < len(seq):
                         prev_price = seq[i+1]["price"]
-                        diff = abs(cur_price - prev_price)
-                        change_type = "decrease" if cur_price < prev_price else ("increase" if cur_price > prev_price else "initial")
-                        change_amount = diff
+                        change_amount = cur_price - prev_price
+                        if change_amount < 0:
+                            change_type = "decrease"
+                        elif change_amount > 0:
+                            change_type = "increase"
+                        else:
+                            change_type = "initial"
                     else:
                         change_type = "initial"
                         change_amount = 0

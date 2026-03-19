@@ -1,0 +1,31 @@
+{
+  "url": "https://www.cian.ru/sale/flat/326002860/",
+  "cian_id": "326002860",
+  "price": 29700000,
+  "price_per_m2": 332960,
+  "title": "Продается 3-комн. квартира, 89,2 м²",
+  "description": "3-комн. квартира, с мебелью, евроремонт, высота потолков 2.7м.",
+  "address": {
+    "full": "Совхозная ул., 10А, Москва",
+    "district": "Люблино",
+    "metro_station": "Люблино",
+    "okrug": "ЦАО"
+  },
+  "area": 89.2,
+  "rooms": 3,
+  "housing_type": "Вторичка",
+  "floor_info": {
+    "current": 6,
+    "all": 11
+  },
+  "construction_year": 2024,
+  "renovation": "Евроремонт",
+  "metro_walk_time": 7,
+  "publish_date": "2026-01-20",
+  "days_in_exposition": 59,
+  "total_views": 461,
+  "unique_views": 10,
+  "is_active": false,
+  "price_history": [],
+  "parsed_at": "2026-03-20T03:02:03.619564"
+}

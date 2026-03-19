@@ -57,6 +57,7 @@ services:
       - TZ=Europe/Moscow
     volumes:
       - ./credentials.json:/app/credentials.json
+      - ./data:/app/data
     depends_on:
       cookie_manager:
         condition: service_healthy

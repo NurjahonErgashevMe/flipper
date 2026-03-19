@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def extract_ad_urls_from_search(
     search_url: str,
     location: str = "Москва",
-    max_urls_per_search: int = 3,
+    max_pages: int = 50,
     http_proxy: str = None
 ) -> List[str]:
     """
@@ -24,7 +24,7 @@ def extract_ad_urls_from_search(
     Args:
         search_url: URL поисковой страницы (например, с фильтрами)
         location: Город (по умолчанию "Москва")
-        max_urls_per_search: Сколько первых ссылок вернуть (по умолчанию 3)
+        max_pages: Максимальное количество страниц пагинации для парсинга (по умолчанию 50)
         http_proxy: URL прокси (если нужно)
         
     Returns:
@@ -42,7 +42,7 @@ def extract_ad_urls_from_search(
         logger.error(f"cianparser not available: {e}")
         raise ImportError("Ensure cianparser is installed in services/parser_cian/cianparser/")
     
-    logger.info(f"Extracting URLs from search page: {search_url}")
+    logger.info(f"Extracting URLs from search page: {search_url} (up to {max_pages} pages)")
     
     # Определяем тип сделки (продажа или аренда)
     deal_type = "sale" if "sale" in search_url else "rent"
@@ -55,41 +55,61 @@ def extract_ad_urls_from_search(
             proxies=proxies
         )
         
-        # Настраиваем парсер для извлечения ссылок
-        parser.__parser__ = FlatListPageParser(
-            session=parser.__session__,
-            accommodation_type="flat",
-            deal_type=deal_type,
-            rent_period_type=None,
-            location_name=location,
-            with_saving_csv=False,
-            with_extra_data=False,
-            additional_settings={"start_page": 1, "end_page": 1},
-        )
+        all_urls = set()
         
-        # Форматируем URL для парсера (заменяем номер страницы на {})
-        if "&p=" in search_url or "?p=" in search_url:
-            url_format = re.sub(r"([&?])p=\d+", r"\g<1>p={}", search_url)
-        else:
-            separator = "&" if "?" in search_url else "?"
-            url_format = search_url + f"{separator}p={{}}"
+        for page in range(1, max_pages + 1):
+            logger.info(f"Parsing search page {page} / {max_pages}")
+            
+            # Настраиваем парсер для извлечения ссылок для конкретной страницы
+            parser.__parser__ = FlatListPageParser(
+                session=parser.__session__,
+                accommodation_type="flat",
+                deal_type=deal_type,
+                rent_period_type=None,
+                location_name=location,
+                with_saving_csv=False,
+                with_extra_data=False,
+                additional_settings={"start_page": page, "end_page": page},
+            )
+            
+            # Форматируем URL для парсера (заменяем номер страницы на {})
+            if "&p=" in search_url or "?p=" in search_url:
+                url_format = re.sub(r"([&?])p=\d+", r"\g<1>p={}", search_url)
+            else:
+                separator = "&" if "?" in search_url else "?"
+                url_format = search_url + f"{separator}p={{}}"
+            
+            # Запускаем парсер только для текущей страницы
+            parser.__run__(url_format)
+            
+            # Извлекаем ссылки и сразу отрезаем мусорные параметры (?context=... и т.д.)
+            parsed_data = parser.__parser__.result
+            page_urls = []
+            for item in parsed_data:
+                if "url" in item:
+                    clean_url = item["url"].split("?")[0]
+                    if clean_url.endswith("/"):
+                        clean_url = clean_url[:-1]  # Нормализуем слеш
+                    clean_url += "/" # Добавим обратно чтобы все были /
+                    page_urls.append(clean_url)
+            
+            if not page_urls:
+                logger.info("No URLs found on this page. Stopping pagination.")
+                break
+                
+            # Проверяем, вернул ли Cian те же самые ссылки (например, редирект на первую страницу)
+            new_urls = set(page_urls) - all_urls
+            if not new_urls:
+                logger.info("All URLs on this page are duplicates. Pagination exhausted.")
+                break
+                
+            all_urls.update(page_urls)
+            logger.info(f"Added {len(new_urls)} new URLs. Total unique so far: {len(all_urls)}")
+            
+        final_urls = list(all_urls)
+        logger.info(f"Completed extracting {len(final_urls)} total unique ad URLs")
         
-        logger.debug(f"URL format for parser: {url_format}")
-        
-        # Запускаем парсер
-        parser.__run__(url_format)
-        
-        # Извлекаем ссылки
-        parsed_data = parser.__parser__.result
-        all_urls = [item["url"] for item in parsed_data if "url" in item]
-        
-        logger.info(f"Found {len(all_urls)} ad URLs on search page")
-        
-        # Возвращаем первые max_urls_per_search
-        extracted = all_urls[:max_urls_per_search]
-        logger.info(f"Returning top {len(extracted)} URLs: {extracted}")
-        
-        return extracted
+        return final_urls
         
     except Exception as e:
         logger.error(f"Failed to extract URLs from search page: {e}", exc_info=True)
@@ -99,7 +119,7 @@ def extract_ad_urls_from_search(
 def extract_batch_from_searches(
     search_urls: List[str],
     location: str = "Москва",
-    max_urls_per_search: int = 3,
+    max_pages: int = 50,
     http_proxy: str = None,
     change_ip_callback=None
 ) -> List[str]:
@@ -109,7 +129,7 @@ def extract_batch_from_searches(
     Args:
         search_urls: Список поисковых URL
         location: Город
-        max_urls_per_search: Количество ссылок с каждой поисковой страницы
+        max_pages: Максимальное количество страниц для каждой поисковой ссылки
         http_proxy: URL прокси
         change_ip_callback: Функция для смены IP перед каждой страницей
         
@@ -132,7 +152,7 @@ def extract_batch_from_searches(
             urls = extract_ad_urls_from_search(
                 search_url=search_url,
                 location=location,
-                max_urls_per_search=max_urls_per_search,
+                max_pages=max_pages,
                 http_proxy=http_proxy
             )
             all_ad_urls.extend(urls)

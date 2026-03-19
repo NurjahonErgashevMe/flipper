@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class Settings(BaseSettings):
     """
     Конфигурация сервиса parser_cian.
-    
+
     Все переменные загружаются из .env файла.
     Поддерживает как локальную разработку, так и Docker окружение.
     """
@@ -54,10 +54,17 @@ class Settings(BaseSettings):
     parser_concurrency: int = 2
     """Количество одновременных воркеров для парсинга (защита от rate limits)"""
 
+    min_unique_views: int = 200
+    """Минимальное количество уникальных просмотров за сегодня для выделения цветом (Offers_Parser)"""
+
+    # === Colors ===
+    sheet_highlight_color: dict = {"red": 1.0, "green": 0.9, "blue": 0.7}
+    """Цвет выделения строк в Google Sheets (RGB)"""
+
     model_config = SettingsConfigDict(
         env_file=os.path.join(
             os.path.dirname(__file__),
-            "../../.env"  # Относительный путь к .env в корне проекта
+            "../../.env",  # Относительный путь к .env в корне проекта
         ),
         env_file_encoding="utf-8",
         extra="ignore",  # Игнорируем неиспользуемые переменные
@@ -65,14 +72,14 @@ class Settings(BaseSettings):
 
     def __init__(self, **data):
         super().__init__(**data)
-        
+
         # Валидация обязательных полей
         if not self.firecrawl_api_key:
             raise ValueError(
                 "FIRECRAWL_API_KEY не установлена в .env файле. "
                 "Получите ключ на https://firecrawl.dev"
             )
-        
+
         logger.info(f"Settings loaded from {self.model_config['env_file']}")
         logger.debug(f"Cookie Manager URL: {self.cookie_manager_url}")
 
@@ -84,17 +91,17 @@ settings = Settings()
 def validate_config() -> bool:
     """
     Проверяет что все обязательные переменные окружения установлены.
-    
+
     Returns:
         True если все OK, иначе выбрасывает ValueError
     """
     try:
         # Проверка credentials.json будет в SheetsManager.__init__()
         # Здесь проверяем только специфичные для parser_cian настройки
-        
+
         logger.info("✓ Configuration validated successfully")
         return True
-        
+
     except Exception as e:
         logger.error(f"Configuration validation failed: {e}")
         raise
@@ -103,7 +110,7 @@ def validate_config() -> bool:
 def get_settings() -> Settings:
     """
     Возвращает глобальный экземпляр настроек.
-    
+
     Returns:
         Settings instance
     """

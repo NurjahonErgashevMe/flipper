@@ -2,14 +2,14 @@
 services.parser_cian.main - Entry point orchestrator
 
 Оркестратор для сервиса парсинга Cian.
-Управляет полным циклом: чтение URLs -> парсинг -> сохранение в Sheets.
+Управляет полным циклом: чтение URLs -> SQLite БД -> парсинг -> сохранение в БД и Sheets.
 """
 
 import asyncio
 import logging
 import sys
 
-# Общие пакеты (Docker их найдет благодаря PYTHONPATH="/app")
+# Общие пакеты
 from packages.flipper_core.sheets import SheetsManager
 from packages.flipper_core.utils import log_section
 
@@ -18,6 +18,7 @@ from services.parser_cian.config import settings, validate_config
 from services.parser_cian.parser import AdParser
 from services.parser_cian.queue_manager import QueueManager
 from services.parser_cian.search_parser import extract_batch_from_searches
+from services.parser_cian.db.repository import DatabaseRepository
 
 # Настройка логирования
 logging.basicConfig(
@@ -30,9 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
-    """
-    Главная функция оркестратора.
-    """
+    """Главная функция оркестратора."""
     log_section("Starting Parser Cian Service")
     
     try:
@@ -43,6 +42,13 @@ async def main():
         # === STEP 2: Initialize Components ===
         log_section("Step 2: Initializing Components")
         
+        logger.info("Initializing SQLite Database...")
+        import os
+        os.makedirs("data", exist_ok=True)
+        db_repo = DatabaseRepository(db_path="data/parser_cian.db")
+        await db_repo.init_db()
+        logger.info("✓ Database initialized")
+
         logger.info("Initializing Google Sheets Manager...")
         sheets_manager = SheetsManager()
         logger.info("✓ Sheets Manager initialized")
@@ -55,46 +61,60 @@ async def main():
         queue_manager = QueueManager(
             parser=parser,
             sheets_manager=sheets_manager,
+            db_repo=db_repo,
             concurrency=settings.parser_concurrency,
         )
         logger.info("✓ Queue Manager initialized")
 
-        # === STEP 3: Read URLs from Google Sheets ===
-        log_section("Step 3: Reading URLs from Google Sheets")
+        # === STEP 3: Read URLs from Google Sheets and Sync to DB ===
+        log_section("Step 3: Syncing Fitlers with Database")
         
         logger.info("Reading search URLs from 'FILTERS' tab...")
         search_urls = sheets_manager.get_urls(tab_name="FILTERS", column="A")
         
-        if not search_urls:
-            logger.warning("No search URLs found in FILTERS tab")
+        if search_urls:
+            await db_repo.add_filters(search_urls)
+            logger.info(f"✓ Synced {len(search_urls)} search URLs to DB")
+            
+        saved_filters = await db_repo.get_all_filters()
+        if not saved_filters:
+            logger.warning("No search URLs found in DB or FILTERS tab")
             logger.info("Exiting gracefully")
             return
-        
-        logger.info(f"✓ Found {len(search_urls)} search URLs (categories)")
+
+        active_search_urls = [f["url"] for f in saved_filters]
+        logger.info(f"✓ Found {len(active_search_urls)} active search URLs in DB")
 
         # === STEP 4: Extract Ad URLs from Search Pages ===
         log_section("Step 4: Extracting Ad URLs from Search Pages")
         
-        logger.info(f"Extracting ad URLs from {len(search_urls)} search pages...")
-        all_ad_urls = extract_batch_from_searches(
-            search_urls=search_urls,
+        logger.info(f"Extracting ad URLs from {len(active_search_urls)} search pages...")
+        all_new_ad_urls = extract_batch_from_searches(
+            search_urls=active_search_urls,
             location="Москва",
-            max_urls_per_search=1,
+            max_pages=50,  # Идем до 50 страниц вглубь
             http_proxy=settings.http_proxy if settings.http_proxy else None
         )
         
-        if not all_ad_urls:
-            logger.warning("No ad URLs extracted from any category")
+        if all_new_ad_urls:
+            await db_repo.add_ad_urls(all_new_ad_urls)
+            logger.info(f"✓ Synced {len(all_new_ad_urls)} newly extracted ad URLs to DB")
+
+        # Fetch all active ads from DB to parse
+        active_ad_urls = await db_repo.get_all_active_ads()
+        
+        if not active_ad_urls:
+            logger.warning("No active ad URLs found in DB for parsing")
             logger.info("Exiting gracefully")
             return
-        
-        logger.info(f"✓ Total ad URLs to parse: {len(all_ad_urls)}")
+            
+        logger.info(f"✓ Total active ad URLs from DB ready to parse: {len(active_ad_urls)}")
 
         # === STEP 5: Parse Ad URLs ===
         log_section("Step 5: Parsing Individual Ads")
         
-        logger.info(f"Starting asynchronous parsing of {len(all_ad_urls)} ad URLs...")
-        stats = await queue_manager.run(all_ad_urls)
+        logger.info(f"Starting asynchronous parsing of {len(active_ad_urls)} ad URLs...")
+        stats = await queue_manager.run(active_ad_urls)
 
         # === STEP 6: Report Results ===
         log_section("Step 6: Execution Summary")
@@ -106,12 +126,6 @@ async def main():
         
         logger.info("✓ Parser Cian Service completed successfully")
 
-    except ValueError as e:
-        logger.error(f"Configuration Error: {e}")
-        sys.exit(1)
-    except FileNotFoundError as e:
-        logger.error(f"File Not Found: {e}")
-        sys.exit(1)
     except Exception as e:
         logger.error(f"Critical error: {type(e).__name__}: {e}", exc_info=True)
         sys.exit(1)
