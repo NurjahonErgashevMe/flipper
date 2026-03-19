@@ -44,7 +44,8 @@ async def test_single_ad():
     logger.info("🔌 Подключаемся к Cookie Manager...")
     parser = AdParser(cookie_manager_url="http://localhost:8000")
     
-    url = "https://www.cian.ru/sale/flat/326100259/"
+    # url = "https://www.cian.ru/sale/flat/326100259/"
+    url = "https://www.cian.ru/sale/flat/326002860/"
     logger.info(f"🧪 Тестируем полный парсинг (Firecrawl + Статистика + История цен)")
     logger.info(f"📍 URL: {url}")
     

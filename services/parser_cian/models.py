@@ -171,6 +171,12 @@ class ParsedAdData(BaseModel):
             return None
         return v
 
+    # Статус объявления
+    is_active: Optional[bool] = Field(
+        None,
+        description="Активно ли объявление. False если снято с публикации/продано.",
+    )
+
     # История цен
     price_history: Optional[List[PriceHistoryEntry]] = Field(
         None,
@@ -253,5 +259,6 @@ def parse_to_sheets_row(data: ParsedAdData) -> List[Any]:
         data.total_views or "",                            # S: Всего просмотров
         data.unique_views or "",                           # T: Уникальных просмотров
         data.cian_id or "",                                # U: ID Cian
+        data.is_active if data.is_active is not None else "",  # W: Активно
         parsed_at_str,                                     # V: Время парсинга (строка в формате YYYY-MM-DD HH:MM:SS)
     ]
