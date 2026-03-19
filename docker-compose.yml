@@ -1,4 +1,25 @@
 services:
+  html_to_markdown:
+    build:
+      context: ./packages/go-html-to-md
+      dockerfile: Dockerfile
+    container_name: html_to_markdown
+    restart: unless-stopped
+    ports:
+      - "8090:8080"  # Go service
+    environment:
+      - PORT=8080
+      - ENV=production
+      - TZ=Europe/Moscow
+    networks:
+      - flipper_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
   cookie_manager:
     build:
       context: ./services/cookie_manager
@@ -10,6 +31,8 @@ services:
       - "8080:8080"  # NoVNC
     env_file:
       - .env
+    environment:
+      - TZ=Europe/Moscow
     volumes:
       - ./services/cookie_manager/cookies.json:/app/cookies.json
     depends_on:
@@ -30,10 +53,34 @@ services:
     container_name: parser_cian
     env_file:
       - .env
+    environment:
+      - TZ=Europe/Moscow
     volumes:
       - ./credentials.json:/app/credentials.json
     depends_on:
       cookie_manager:
+        condition: service_healthy
+      html_to_markdown:
+        condition: service_healthy
+    networks:
+      - flipper_network
+    profiles:
+      - manual  # Запускается только вручную
+
+  category_counter:
+    build:
+      context: .  # Контекст - корень проекта
+      dockerfile: ./services/category_counter/Dockerfile
+    container_name: category_counter
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Moscow
+      - PYTHONPATH=/app
+    volumes:
+      - ./credentials.json:/app/credentials.json
+    depends_on:
+      html_to_markdown:
         condition: service_healthy
     networks:
       - flipper_network

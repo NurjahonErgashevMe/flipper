@@ -44,10 +44,7 @@ async def main():
         log_section("Step 2: Initializing Components")
         
         logger.info("Initializing Google Sheets Manager...")
-        sheets_manager = SheetsManager(
-            spreadsheet_id=settings.spreadsheet_id,
-            credentials_path=settings.credentials_path,
-        )
+        sheets_manager = SheetsManager()
         logger.info("✓ Sheets Manager initialized")
 
         logger.info("Initializing Firecrawl Parser...")

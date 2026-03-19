@@ -27,12 +27,22 @@ class SheetsManager:
     - read_range(range_str: str) -> List[List[Any]]
     """
 
-    def __init__(self, spreadsheet_id: str, credentials_path: str):
+    def __init__(self, spreadsheet_id: str = None, credentials_path: str = None):
         """
         Args:
-            spreadsheet_id: ID документа Google Sheets
-            credentials_path: Путь к JSON ключу Service Account
+            spreadsheet_id: ID документа Google Sheets (если None, берется из SPREADSHEET_ID env)
+            credentials_path: Путь к JSON ключу Service Account (если None, берется из CREDENTIALS_PATH env или /app/credentials.json)
         """
+        # Получаем spreadsheet_id из env если не передан
+        if spreadsheet_id is None:
+            spreadsheet_id = os.getenv("SPREADSHEET_ID")
+            if not spreadsheet_id:
+                raise ValueError("SPREADSHEET_ID must be provided or set in environment variables")
+        
+        # Получаем credentials_path из env если не передан
+        if credentials_path is None:
+            credentials_path = os.getenv("CREDENTIALS_PATH", "/app/credentials.json")
+        
         self.spreadsheet_id = spreadsheet_id
         
         if not os.path.exists(credentials_path):

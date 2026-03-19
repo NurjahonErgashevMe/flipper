@@ -32,16 +32,13 @@ async def test_single_ad():
         return
 
     # Инициализация Google Sheets Manager
-    spreadsheet_id = os.getenv("SPREADSHEET_ID")
-    credentials_path = os.getenv("CREDENTIALS_PATH", "credentials.json")
-    
     sheets_manager = None
-    if spreadsheet_id and os.path.exists(credentials_path):
+    try:
         logger.info("📊 Инициализация Google Sheets Manager...")
-        sheets_manager = SheetsManager(spreadsheet_id, credentials_path)
+        sheets_manager = SheetsManager()
         logger.info("✅ Google Sheets Manager готов")
-    else:
-        logger.warning("⚠️ Google Sheets не настроен (пропущен SPREADSHEET_ID или credentials.json)")
+    except (ValueError, FileNotFoundError) as e:
+        logger.warning(f"⚠️ Google Sheets не настроен: {e}")
 
     # Подключаемся к менеджеру кук (он запущен в Docker и доступен на 8000 порту локалхоста)
     logger.info("🔌 Подключаемся к Cookie Manager...")

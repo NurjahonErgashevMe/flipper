@@ -26,17 +26,6 @@ class Settings(BaseSettings):
     firecrawl_api_key: str = ""
     """API ключ для Firecrawl (обязательно)"""
 
-    # === Google Sheets ===
-    spreadsheet_id: str = ""
-    """ID документа Google Sheets для записи результатов (обязательно)"""
-
-    credentials_path: str = "/app/credentials.json"
-    """Путь к credentials.json файлу Google Service Account
-    
-    В Docker: /app/credentials.json (mount volume)
-    Локально: может быть переопределено через .env
-    """
-
     # === Cookie Manager ===
     cookie_manager_url: str = "http://cookie_manager:8000"
     """URL микросервиса управления куками
@@ -84,14 +73,7 @@ class Settings(BaseSettings):
                 "Получите ключ на https://firecrawl.dev"
             )
         
-        if not self.spreadsheet_id:
-            raise ValueError(
-                "SPREADSHEET_ID не установлена в .env файле. "
-                "Это ID вашего Google Sheets документа."
-            )
-        
         logger.info(f"Settings loaded from {self.model_config['env_file']}")
-        logger.debug(f"Spreadsheet ID: {self.spreadsheet_id}")
         logger.debug(f"Cookie Manager URL: {self.cookie_manager_url}")
 
 
@@ -107,12 +89,8 @@ def validate_config() -> bool:
         True если все OK, иначе выбрасывает ValueError
     """
     try:
-        # Проверка файла credentials.json
-        if not Path(settings.credentials_path).exists():
-            raise FileNotFoundError(
-                f"credentials.json не найден по пути: {settings.credentials_path}\n"
-                f"Получите Google Service Account JSON ключ и поместите в проект."
-            )
+        # Проверка credentials.json будет в SheetsManager.__init__()
+        # Здесь проверяем только специфичные для parser_cian настройки
         
         logger.info("✓ Configuration validated successfully")
         return True

@@ -1,5 +1,9 @@
 FROM python:3.11-slim
 
+# Set timezone to Moscow
+ENV TZ=Europe/Moscow
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
 # Устанавливаем рабочую директорию как корень проекта
 WORKDIR /app
 
