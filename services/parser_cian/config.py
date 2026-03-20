@@ -9,6 +9,7 @@ import os
 import logging
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,17 @@ class Settings(BaseSettings):
 
     min_unique_views: int = 200
     """Минимальное количество уникальных просмотров за сегодня для выделения цветом (Offers_Parser)"""
+
+    # === Avans Parser Settings ===
+    avans_search_url: str = Field(
+        default="https://www.cian.ru/cat.php?context=%D0%92%D0%BD%D0%B5%D1%81%D0%BB%D0%B8+%D0%B0%D0%B2%D0%B0%D0%BD%D1%81%7C%D0%B2%D0%BD%D0%B5%D1%81%D0%B5%D0%BD+%D0%B0%D0%B2%D0%B0%D0%BD%D1%81%7C%D0%B2%D0%BD%D0%B5%D1%81%D0%B5%D0%BD+%D0%B7%D0%B0%D0%B4%D0%B0%D1%82%D0%BE%D0%BA%7C%D0%B2%D0%BD%D0%B5%D1%81%D0%BB%D0%B8+%D0%B7%D0%B0%D0%B4%D0%B0%D1%82%D0%BE%D0%BA&deal_type=sale&demolished_in_moscow_programm=0&electronic_trading=2&engine_version=2&flat_share=2&is_first_floor=0&m2=1&object_type%5B0%5D=1&offer_type=flat&only_flat=1&region=1&room1=1&room2=1&room3=1&room4=1&room5=1&room6=1",
+        description="Ссылка для парсинга активных авансов (статичная с кучей фильтров)"
+    )
+    avans_max_pages: int = Field(default=2, description="Количество страниц для парсинга авансов")
+
+    # Telegram Notification Settings
+    tg_bot_token: str = Field(default="", description="Токен Telegram бота")
+    tg_chat_id: str = Field(default="", description="ID чата для отправки уведомлений")
 
     # === Colors ===
     sheet_highlight_color: dict = {"red": 1.0, "green": 0.9, "blue": 0.7}

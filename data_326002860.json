@@ -4,9 +4,9 @@
   "price": 29700000,
   "price_per_m2": 332960,
   "title": "Продается 3-комн. квартира, 89,2 м²",
-  "description": "3-комн. квартира, с мебелью, евроремонт, высота потолков 2.7м.",
+  "description": "Объявление снято с публикации, Поиск другой недвижимости.",
   "address": {
-    "full": "Совхозная ул., 10А, Москва",
+    "full": "Москва, Совхозная ул., 10А",
     "district": "Люблино",
     "metro_station": "Люблино",
     "okrug": "ЦАО"
@@ -22,10 +22,10 @@
   "renovation": "Евроремонт",
   "metro_walk_time": 7,
   "publish_date": "2026-01-20",
-  "days_in_exposition": 59,
-  "total_views": 461,
-  "unique_views": 10,
+  "days_in_exposition": 60,
+  "total_views": 470,
+  "unique_views": 9,
   "is_active": false,
   "price_history": [],
-  "parsed_at": "2026-03-20T03:02:03.619564"
+  "parsed_at": "2026-03-20T05:54:40.956276"
 }

@@ -7,6 +7,7 @@ services.parser_cian.queue_manager - Asynchronous queue management
 
 import asyncio
 import logging
+import httpx
 from typing import List, Callable, Optional, Dict, Any
 from datetime import datetime
 
@@ -62,6 +63,30 @@ def check_signals(price_history: List[Dict[str, Any]]) -> bool:
     return has_large_drop and (drop_count_30d >= 3)
 
 
+async def send_telegram_notification(message: str) -> None:
+    """Отправляет уведомление в Telegram, если настроены токен и ID чата."""
+    token = settings.tg_bot_token
+    chat_id = settings.tg_chat_id
+    
+    if not token or not chat_id:
+        return
+        
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, json=payload, timeout=10.0)
+            if resp.status_code != 200:
+                logger.warning(f"Telegram API warning: {resp.text}")
+    except Exception as e:
+        logger.error(f"Error sending Telegram notification: {e}")
+
+
 class QueueManager:
     """
     Менеджер асинхронной очереди для парсинга URLs с трекингом в БД.
@@ -74,12 +99,14 @@ class QueueManager:
         db_repo: DatabaseRepository,
         on_data_parsed: Optional[Callable[[ParsedAdData], None]] = None,
         concurrency: int = 2,
+        mode: str = "regular",
     ):
         self.parser = parser
         self.sheets_manager = sheets_manager
         self.db_repo = db_repo
         self.on_data_parsed = on_data_parsed
         self.concurrency = concurrency
+        self.mode = mode
         self.queue: asyncio.Queue = asyncio.Queue()
         
         self.processed_count = 0
@@ -135,37 +162,60 @@ class QueueManager:
                     
                     # Обновляем БД
                     await self.db_repo.update_active_ad(url, parsed_dict)
-                    
-                    # Определяем цвета:
-                    # Offers_Parser: цвет выделения если unique_views >= min_unique_views
-                    offers_color = None
-                    if parsed_data.unique_views and parsed_data.unique_views >= settings.min_unique_views:
-                        offers_color = settings.sheet_highlight_color
-                        
-                    # Signals_Parser: цвет выделения если check_signals == True
-                    signals_color = None
-                    if check_signals(parsed_dict.get("price_history", [])):
-                        signals_color = settings.sheet_highlight_color
-                        
-                    # Пишем в Sheets "Offers_Parser"
+                    # Определяем логику в зависимости от режима
                     loop = asyncio.get_event_loop()
-                    async with self._sheets_lock:
-                        success1 = await loop.run_in_executor(
-                            None,
-                            lambda: self.sheets_manager.find_and_update_row(
-                                "Offers_Parser", row, id_value=parsed_data.cian_id, id_column_index=20, bg_color=offers_color
-                            )
-                        )
-                        
-                        # Пишем в Sheets "Signals_Parser"
-                        success2 = await loop.run_in_executor(
-                            None,
-                            lambda: self.sheets_manager.find_and_update_row(
-                                "Signals_Parser", row, id_value=parsed_data.cian_id, id_column_index=20, bg_color=signals_color
-                            )
-                        )
+                    success = False
                     
-                    success = success1 or success2
+                    if self.mode == "avans":
+                        logger.info(f"💾 [Worker-{worker_id}] Пишем в Avans...")
+                        async with self._sheets_lock:
+                            success = await loop.run_in_executor(
+                                None,
+                                lambda: self.sheets_manager.find_and_update_row(
+                                    "Avans", row, id_value=parsed_data.cian_id, id_column_index=20, bg_color=None
+                                )
+                            )
+                    else:
+                        # Режим 'regular'
+                        offers_color = None
+                        if parsed_data.unique_views and parsed_data.unique_views >= settings.min_unique_views:
+                            offers_color = settings.sheet_highlight_color
+                            msg = (
+                                f"🌟 <b>Offers_Parser Match!</b>\n\n"
+                                f"Уникальных просмотров сегодня: {parsed_data.unique_views}\n"
+                                f"Цена: {parsed_data.price} руб.\n"
+                                f"Ссылка: <a href='{url}'>{url}</a>"
+                            )
+                            # Запукаем отправку не блокируя воркер
+                            asyncio.create_task(send_telegram_notification(msg))
+                            
+                        signals_color = None
+                        if check_signals(parsed_dict.get("price_history", [])):
+                            signals_color = settings.sheet_highlight_color
+                            msg = (
+                                f"🚦 <b>Signals_Parser Match!</b>\n\n"
+                                f"Сработало условие по снижению цены (более 3 раз за 30 дней и падение >= 5%).\n"
+                                f"Цена: {parsed_data.price} руб.\n"
+                                f"Ссылка: <a href='{url}'>{url}</a>"
+                            )
+                            asyncio.create_task(send_telegram_notification(msg))
+                            
+                        async with self._sheets_lock:
+                            # Offers_Parser
+                            success1 = await loop.run_in_executor(
+                                None,
+                                lambda: self.sheets_manager.find_and_update_row(
+                                    "Offers_Parser", row, id_value=parsed_data.cian_id, id_column_index=20, bg_color=offers_color
+                                )
+                            )
+                            # Signals_Parser
+                            success2 = await loop.run_in_executor(
+                                None,
+                                lambda: self.sheets_manager.find_and_update_row(
+                                    "Signals_Parser", row, id_value=parsed_data.cian_id, id_column_index=20, bg_color=signals_color
+                                )
+                            )
+                        success = success1 or success2
 
                 if success:
                     logger.info(f"✅ [Worker-{worker_id}] Успешно обработано: {url} | ID: {parsed_data.cian_id}")

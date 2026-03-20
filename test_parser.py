@@ -22,7 +22,7 @@ sys.path.append(os.path.join(current_dir, 'services', 'parser_cian'))
 from services.parser_cian.parser import AdParser
 from services.parser_cian.models import parse_to_sheets_row
 from packages.flipper_core.sheets import SheetsManager
-from services.parser_cian.queue_manager import check_signals
+from services.parser_cian.queue_manager import check_signals, send_telegram_notification
 
 # Загружаем переменные из .env
 load_dotenv()
@@ -88,12 +88,17 @@ async def test_ads():
                     off_bg = {"red": 0.8, "green": 0.9, "blue": 1.0} if (data.unique_views and data.unique_views >= 50) else None
                     logger.info("💾 Пишем в Offers_Parser...")
                     await asyncio.to_thread(sheets_manager.write_row, "Offers_Parser", row, insert_at_top=True, bg_color=off_bg)
+                    if off_bg:
+                        msg = f"🌟 <b>Offers_Parser Match! (TEST)</b>\nУникальных просмотров сегодня: {data.unique_views}\nЦена: {data.price} руб.\nСсылка: <a href='{url}'>{url}</a>"
+                        await send_telegram_notification(msg)
                     
                     # Signals_Parser (Желтый)
                     if is_signal:
                         sig_bg = {"red": 1.0, "green": 0.9, "blue": 0.7}
                         logger.info("💾 Сигнал обнаружен! Пишем в Signals_Parser...")
                         await asyncio.to_thread(sheets_manager.write_row, "Signals_Parser", row, insert_at_top=True, bg_color=sig_bg)
+                        msg = f"🚦 <b>Signals_Parser Match! (TEST)</b>\nСработало условие по снижению цены.\nЦена: {data.price} руб.\nСсылка: <a href='{url}'>{url}</a>"
+                        await send_telegram_notification(msg)
             
         except Exception as e:
             logger.error(f"\n❌ ПРОВАЛ ПАРСИНГА для {url}: {e}", exc_info=True)
@@ -132,12 +137,17 @@ async def test_ads():
                 off_bg = settings.sheet_highlight_color if (mock_data.unique_views and mock_data.unique_views >= settings.min_unique_views) else None
                 logger.info(f"💾 Пишем МОК в Offers_Parser (Highlights: {'ДА' if off_bg else 'НЕТ'})...")
                 await asyncio.to_thread(sheets_manager.find_and_update_row, "Offers_Parser", row_mock, id_value=mock_data.cian_id, id_column_index=20, bg_color=off_bg)
+                if off_bg:
+                    msg = f"🌟 <b>Offers_Parser Match! (MOCK)</b>\nУникальных просмотров сегодня: {mock_data.unique_views}\nЦена: {mock_data.price} руб."
+                    await send_telegram_notification(msg)
                 
                 # Signals_Parser
                 if is_signal:
                     sig_bg = settings.sheet_highlight_color
                     logger.info("💾 Пишем МОК в Signals_Parser...")
                     await asyncio.to_thread(sheets_manager.find_and_update_row, "Signals_Parser", row_mock, id_value=mock_data.cian_id, id_column_index=20, bg_color=sig_bg)
+                    msg = f"🚦 <b>Signals_Parser Match! (MOCK)</b>\nСработало условие по снижению цены.\nЦена: {mock_data.price} руб."
+                    await send_telegram_notification(msg)
                 
                 logger.info("✅ Тест мок-данных успешно завершен")
                 

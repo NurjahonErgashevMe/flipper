@@ -30,9 +30,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def main():
+import argparse
+
+async def main(args):
     """Главная функция оркестратора."""
-    log_section("Starting Parser Cian Service")
+    log_section(f"Starting Parser Cian Service (Mode: {args.mode})")
     
     try:
         # === STEP 1: Validate Configuration ===
@@ -57,42 +59,51 @@ async def main():
         parser = AdParser(cookie_manager_url=settings.cookie_manager_url)
         logger.info("✓ Parser initialized")
 
-        logger.info(f"Initializing Queue Manager (concurrency: {settings.parser_concurrency})...")
+        logger.info(f"Initializing Queue Manager (concurrency: {settings.parser_concurrency}, mode: {args.mode})...")
         queue_manager = QueueManager(
             parser=parser,
             sheets_manager=sheets_manager,
             db_repo=db_repo,
             concurrency=settings.parser_concurrency,
+            mode=args.mode,
         )
         logger.info("✓ Queue Manager initialized")
 
-        # === STEP 3: Read URLs from Google Sheets and Sync to DB ===
-        log_section("Step 3: Syncing Fitlers with Database")
+        # === STEP 3: Setup Search URLs ===
+        log_section(f"Step 3: Setup Search URLs ({args.mode} mode)")
         
-        logger.info("Reading search URLs from 'FILTERS' tab...")
-        search_urls = sheets_manager.get_urls(tab_name="FILTERS", column="A")
-        
-        if search_urls:
-            await db_repo.add_filters(search_urls)
-            logger.info(f"✓ Synced {len(search_urls)} search URLs to DB")
+        if args.mode == "regular":
+            logger.info("Reading search URLs from 'FILTERS' tab...")
+            search_urls = sheets_manager.get_urls(tab_name="FILTERS", column="A")
             
-        saved_filters = await db_repo.get_all_filters()
-        if not saved_filters:
-            logger.warning("No search URLs found in DB or FILTERS tab")
-            logger.info("Exiting gracefully")
-            return
+            if search_urls:
+                await db_repo.add_filters(search_urls)
+                logger.info(f"✓ Synced {len(search_urls)} search URLs to DB")
+                
+            saved_filters = await db_repo.get_all_filters()
+            if not saved_filters:
+                logger.warning("No search URLs found in DB or FILTERS tab")
+                logger.info("Exiting gracefully")
+                return
+    
+            active_search_urls = [f["url"] for f in saved_filters]
+            max_pages_limit = 50
+        else:
+            # avans mode
+            logger.info("Using Avans search URL from config...")
+            active_search_urls = [settings.avans_search_url]
+            max_pages_limit = settings.avans_max_pages
 
-        active_search_urls = [f["url"] for f in saved_filters]
-        logger.info(f"✓ Found {len(active_search_urls)} active search URLs in DB")
+        logger.info(f"✓ Found {len(active_search_urls)} active search URLs")
 
         # === STEP 4: Extract Ad URLs from Search Pages ===
         log_section("Step 4: Extracting Ad URLs from Search Pages")
         
-        logger.info(f"Extracting ad URLs from {len(active_search_urls)} search pages...")
+        logger.info(f"Extracting ad URLs from {len(active_search_urls)} search pages (max {max_pages_limit} pages deep)...")
         all_new_ad_urls = extract_batch_from_searches(
             search_urls=active_search_urls,
             location="Москва",
-            max_pages=50,  # Идем до 50 страниц вглубь
+            max_pages=max_pages_limit,
             http_proxy=settings.http_proxy if settings.http_proxy else None
         )
         
@@ -132,8 +143,18 @@ async def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Parser Cian Service")
+    parser.add_argument(
+        "--mode", 
+        type=str, 
+        choices=["regular", "avans"], 
+        default="regular",
+        help="Режим работы: regular (фильтры) или avans (ссылка из конфига)"
+    )
+    args = parser.parse_args()
+
     try:
-        asyncio.run(main())
+        asyncio.run(main(args))
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         sys.exit(0)
