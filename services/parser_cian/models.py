@@ -49,9 +49,9 @@ class FloorInfo(BaseModel):
 class PriceHistoryEntry(BaseModel):
     """Запись истории изменения цены"""
     
-    date: str = Field(
-        ...,
-        description="Дата изменения цены (например: '10 мар 2026')"
+    date: Optional[str] = Field(
+        None,
+        description="Дата изменения цены (например: '10 мар 2026'); может отсутствовать в сыром JSON.",
     )
     price: int = Field(
         ...,

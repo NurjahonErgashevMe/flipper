@@ -7,10 +7,12 @@ SheetsManager - Generic Google Sheets API wrapper
 
 import os
 import logging
-from typing import List, Any
+import time
+from typing import List, Any, Dict, Optional
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -57,8 +59,109 @@ class SheetsManager:
         # Отключаем file_cache чтобы избежать warnings
         self.service = build("sheets", "v4", credentials=self.credentials, cache_discovery=False)
         self.sheet = self.service.spreadsheets()
-        
+        # Квота Google: ~60 read/min/user — не чаще одного чтения раз в READ_SPACING_SEC
+        self._last_read_mono: float = 0.0
+        self._read_spacing_sec: float = float(os.getenv("SHEETS_READ_SPACING_SEC", "1.05"))
+        self._sheet_id_cache: Dict[str, int] = {}
+
         logger.info(f"SheetsManager initialized for spreadsheet {spreadsheet_id}")
+
+    def _throttle_read(self) -> None:
+        gap = self._read_spacing_sec
+        now = time.monotonic()
+        wait = gap - (now - self._last_read_mono)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_read_mono = time.monotonic()
+
+    def _execute_with_retry(self, fn, max_retries: int = 14):
+        """Повтор при 429 (Read requests per minute per user)."""
+        last_err = None
+        for attempt in range(max_retries):
+            try:
+                return fn()
+            except HttpError as e:
+                last_err = e
+                status = int(e.resp.status) if e.resp is not None else 0
+                if status == 429 and attempt < max_retries - 1:
+                    sleep_s = min(120, 8 + 6 * attempt)
+                    logger.warning(
+                        "Google Sheets 429 (quota), sleep %ss (attempt %s/%s)",
+                        sleep_s,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                raise
+        if last_err:
+            raise last_err
+
+    def batch_get_value_ranges(self, ranges: List[str]) -> Dict[str, List[List[Any]]]:
+        """Один batchGet на несколько диапазонов (меньше запросов, чем по отдельности)."""
+        if not ranges:
+            return {}
+        self._throttle_read()
+
+        def call():
+            return (
+                self.sheet.values()
+                .batchGet(spreadsheetId=self.spreadsheet_id, ranges=ranges)
+                .execute()
+            )
+
+        result = self._execute_with_retry(call)
+        out: Dict[str, List[List[Any]]] = {}
+        for vr in result.get("valueRanges", []) or []:
+            rng = vr.get("range") or ""
+            if "!" in rng:
+                tab = rng.split("!", 1)[0].strip().strip("'\"")
+            else:
+                tab = rng.strip().strip("'\"")
+            if tab:
+                out[tab] = vr.get("values", []) or []
+        return out
+
+    def sync_offers_and_signals(
+        self,
+        row: List[Any],
+        cian_id: str,
+        id_column_index: int,
+        offers_bg_color: Optional[dict],
+        signals_match: bool,
+        signals_bg_color: dict,
+    ) -> bool:
+        """Один batchGet для Offers_Parser + Signals_Parser, затем обновления (меньше read quota)."""
+        by_tab = self.batch_get_value_ranges(
+            ["Offers_Parser!A:Z", "Signals_Parser!A:Z"]
+        )
+        offers_vals = by_tab.get("Offers_Parser") or []
+        signals_vals = by_tab.get("Signals_Parser") or []
+        ok_offers = self.find_and_update_row(
+            "Offers_Parser",
+            row,
+            id_value=cian_id,
+            id_column_index=id_column_index,
+            bg_color=offers_bg_color,
+            existing_values=offers_vals,
+        )
+        if signals_match:
+            self.find_and_update_row(
+                "Signals_Parser",
+                row,
+                id_value=cian_id,
+                id_column_index=id_column_index,
+                bg_color=signals_bg_color,
+                existing_values=signals_vals,
+            )
+        else:
+            self.delete_row_by_id(
+                "Signals_Parser",
+                id_value=cian_id,
+                id_column_index=id_column_index,
+                existing_values=signals_vals,
+            )
+        return ok_offers
 
     def get_urls(self, tab_name: str = "FILTERS", column: str = "A") -> List[str]:
         """
@@ -73,11 +176,19 @@ class SheetsManager:
             Список валидных URL
         """
         try:
-            result = (
-                self.sheet.values()
-                .get(spreadsheetId=self.spreadsheet_id, range=f"{tab_name}!{column}:{column}")
-                .execute()
-            )
+            self._throttle_read()
+
+            def _get():
+                return (
+                    self.sheet.values()
+                    .get(
+                        spreadsheetId=self.spreadsheet_id,
+                        range=f"{tab_name}!{column}:{column}",
+                    )
+                    .execute()
+                )
+
+            result = self._execute_with_retry(_get)
             values = result.get("values", [])
             
             urls = []
@@ -162,63 +273,79 @@ class SheetsManager:
                     }
                 })
 
-                import time
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
-                        # 1) Вставляем новую строку на позицию 2 (index=1) и красим если нужно
-                        self.service.spreadsheets().batchUpdate(
-                            spreadsheetId=self.spreadsheet_id,
-                            body={"requests": requests},
-                        ).execute()
-                        logger.info(f"✓ Inserted empty row at position 2")
-        
-                        # 2) Пишем значения в A2
-                        body = {"values": [row]}
-                        result = (
-                            self.sheet.values()
-                            .update(
-                                spreadsheetId=self.spreadsheet_id,
-                                range=f"{tab_name}!A2",
-                                valueInputOption="USER_ENTERED",
-                                body=body,
+
+                        def _ins():
+                            return (
+                                self.service.spreadsheets()
+                                .batchUpdate(
+                                    spreadsheetId=self.spreadsheet_id,
+                                    body={"requests": requests},
+                                )
+                                .execute()
                             )
-                            .execute()
-                        )
-        
+
+                        self._execute_with_retry(_ins)
+                        logger.info("✓ Inserted empty row at position 2")
+
+                        body = {"values": [row]}
+
+                        def _upd():
+                            return (
+                                self.sheet.values()
+                                .update(
+                                    spreadsheetId=self.spreadsheet_id,
+                                    range=f"{tab_name}!A2",
+                                    valueInputOption="USER_ENTERED",
+                                    body=body,
+                                )
+                                .execute()
+                            )
+
+                        result = self._execute_with_retry(_upd)
+
                         updated = result.get("updatedRows", 0)
                         if updated > 0:
                             logger.info(f"✓ Wrote data to A2, {updated} rows updated")
                         return updated > 0
                     except Exception as e:
                         if attempt < max_retries - 1:
-                            logger.warning(f"Failed to write row (attempt {attempt+1}/{max_retries}): {e}. Retrying...")
+                            logger.warning(
+                                f"Failed to write row (attempt {attempt+1}/{max_retries}): {e}. Retrying..."
+                            )
                             time.sleep(1)
                         else:
                             raise e
 
             # insert_at_top=False -> обычный append вниз
-            import time
             max_retries = 3
             for attempt in range(max_retries):
                 try:
                     body = {"values": [row]}
-                    result = (
-                        self.sheet.values()
-                        .append(
-                            spreadsheetId=self.spreadsheet_id,
-                            range=f"{tab_name}!A:Z",
-                            valueInputOption="USER_ENTERED",
-                            insertDataOption="INSERT_ROWS",
-                            body=body,
+
+                    def _app():
+                        return (
+                            self.sheet.values()
+                            .append(
+                                spreadsheetId=self.spreadsheet_id,
+                                range=f"{tab_name}!A:Z",
+                                valueInputOption="USER_ENTERED",
+                                insertDataOption="INSERT_ROWS",
+                                body=body,
+                            )
+                            .execute()
                         )
-                        .execute()
-                    )
+
+                    result = self._execute_with_retry(_app)
                     updates = result.get("updates", {}) or {}
                     return (updates.get("updatedRows", 0) or 0) > 0
                 except Exception as e:
                     if attempt < max_retries - 1:
-                        logger.warning(f"Failed to append row (attempt {attempt+1}/{max_retries}): {e}. Retrying...")
+                        logger.warning(
+                            f"Failed to append row (attempt {attempt+1}/{max_retries}): {e}. Retrying..."
+                        )
                         time.sleep(1)
                     else:
                         raise e
@@ -233,7 +360,8 @@ class SheetsManager:
         row: List[Any],
         id_value: str,
         id_column_index: int = 0,
-        bg_color: dict = None
+        bg_color: dict = None,
+        existing_values: Optional[List[List[Any]]] = None,
     ) -> bool:
         """Ищет строку по ID в указанной колонке и обновляет её.
         Если не находит - вставляет новую наверх.
@@ -244,23 +372,35 @@ class SheetsManager:
             id_value: Значение ID для поиска (например cian_id)
             id_column_index: Индекс колонки с ID (0 = A)
             bg_color: Цвет фона для обновления
+            existing_values: Уже загруженные строки листа (из batchGet) — без лишнего read
 
         Returns:
             True если успешно
         """
         try:
-            # 1. Сначала пытаемся найти строку
-            result = self.sheet.values().get(
-                spreadsheetId=self.spreadsheet_id,
-                range=f"{tab_name}!A:Z"
-            ).execute()
-            
-            values = result.get("values", [])
+            if existing_values is not None:
+                values = existing_values
+            else:
+                self._throttle_read()
+
+                def _get_vals():
+                    return (
+                        self.sheet.values()
+                        .get(
+                            spreadsheetId=self.spreadsheet_id,
+                            range=f"{tab_name}!A:Z",
+                        )
+                        .execute()
+                    )
+
+                result = self._execute_with_retry(_get_vals)
+                values = result.get("values", [])
             row_index = -1
             
             # Пропускаем первую строку (заголовок)
             for i, existing_row in enumerate(values):
-                if i == 0: continue
+                if i == 0:
+                    continue
                 if len(existing_row) > id_column_index and str(existing_row[id_column_index]) == str(id_value):
                     row_index = i + 1 # 1-based index
                     break
@@ -271,13 +411,21 @@ class SheetsManager:
                 
                 # Обновляем значения
                 body = {"values": [row]}
-                self.sheet.values().update(
-                    spreadsheetId=self.spreadsheet_id,
-                    range=f"{tab_name}!A{row_index}",
-                    valueInputOption="USER_ENTERED",
-                    body=body
-                ).execute()
-                
+
+                def _put_vals():
+                    return (
+                        self.sheet.values()
+                        .update(
+                            spreadsheetId=self.spreadsheet_id,
+                            range=f"{tab_name}!A{row_index}",
+                            valueInputOption="USER_ENTERED",
+                            body=body,
+                        )
+                        .execute()
+                    )
+
+                self._execute_with_retry(_put_vals)
+
                 # Обновляем цвет: если bg_color не задан, сбрасываем в белый
                 bg_color_dict = bg_color if bg_color else {"red": 1.0, "green": 1.0, "blue": 1.0}
                 sheet_id = self._get_sheet_id(tab_name)
@@ -300,10 +448,18 @@ class SheetsManager:
                         "fields": "userEnteredFormat.backgroundColor"
                     }
                 }]
-                self.service.spreadsheets().batchUpdate(
-                    spreadsheetId=self.spreadsheet_id,
-                    body={"requests": requests}
-                ).execute()
+
+                def _fmt():
+                    return (
+                        self.service.spreadsheets()
+                        .batchUpdate(
+                            spreadsheetId=self.spreadsheet_id,
+                            body={"requests": requests},
+                        )
+                        .execute()
+                    )
+
+                self._execute_with_retry(_fmt)
                 
                 return True
             else:
@@ -314,26 +470,96 @@ class SheetsManager:
             logger.error(f"Failed to find_and_update_row for {id_value} in {tab_name}: {e}")
             return False
 
+    def delete_row_by_id(
+        self,
+        tab_name: str,
+        id_value: str,
+        id_column_index: int = 0,
+        existing_values: Optional[List[List[Any]]] = None,
+    ) -> bool:
+        """Удаляет строку с заданным ID в колонке. Если строки нет — True (идемпотентно)."""
+        try:
+            if existing_values is not None:
+                values = existing_values
+            else:
+                self._throttle_read()
+
+                def _get_vals():
+                    return (
+                        self.sheet.values()
+                        .get(
+                            spreadsheetId=self.spreadsheet_id,
+                            range=f"{tab_name}!A:Z",
+                        )
+                        .execute()
+                    )
+
+                result = self._execute_with_retry(_get_vals)
+                values = result.get("values", [])
+            row_index = -1
+            for i, existing_row in enumerate(values):
+                if i == 0:
+                    continue
+                if (
+                    len(existing_row) > id_column_index
+                    and str(existing_row[id_column_index]) == str(id_value)
+                ):
+                    row_index = i + 1
+                    break
+            if row_index == -1:
+                return True
+            sheet_id = self._get_sheet_id(tab_name)
+
+            def _del():
+                return (
+                    self.service.spreadsheets()
+                    .batchUpdate(
+                        spreadsheetId=self.spreadsheet_id,
+                        body={
+                            "requests": [
+                                {
+                                    "deleteDimension": {
+                                        "range": {
+                                            "sheetId": sheet_id,
+                                            "dimension": "ROWS",
+                                            "startIndex": row_index - 1,
+                                            "endIndex": row_index,
+                                        }
+                                    }
+                                }
+                            ]
+                        },
+                    )
+                    .execute()
+                )
+
+            self._execute_with_retry(_del)
+            logger.info(f"Deleted row for id={id_value} from {tab_name} (sheet row {row_index})")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete_row_by_id for {id_value} in {tab_name}: {e}")
+            return False
+
     def _get_sheet_id(self, tab_name: str) -> int:
-        """Получает ID листа по имени"""
-        import time
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                sheet_metadata = self.service.spreadsheets().get(
-                    spreadsheetId=self.spreadsheet_id
-                ).execute()
-                for sheet in sheet_metadata.get("sheets", []):
-                    if sheet["properties"]["title"] == tab_name:
-                        return sheet["properties"]["sheetId"]
-                raise ValueError(f"Sheet '{tab_name}' not found")
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Failed to get sheet ID (attempt {attempt+1}/{max_retries}): {e}. Retrying...")
-                    time.sleep(1)
-                else:
-                    logger.error(f"Failed to get sheet ID: {e}")
-                    raise
+        """ID листа по имени (кэш + один metadata read на всю книгу)."""
+        if tab_name in self._sheet_id_cache:
+            return self._sheet_id_cache[tab_name]
+        self._throttle_read()
+
+        def _meta():
+            return (
+                self.service.spreadsheets()
+                .get(spreadsheetId=self.spreadsheet_id)
+                .execute()
+            )
+
+        sheet_metadata = self._execute_with_retry(_meta)
+        for sheet in sheet_metadata.get("sheets", []):
+            t = sheet["properties"]["title"]
+            self._sheet_id_cache[t] = sheet["properties"]["sheetId"]
+        if tab_name not in self._sheet_id_cache:
+            raise ValueError(f"Sheet '{tab_name}' not found")
+        return self._sheet_id_cache[tab_name]
 
     def write_rows(
         self, 
@@ -397,15 +623,20 @@ class SheetsManager:
             Двумерный список значений
         """
         try:
-            result = (
-                self.sheet.values()
-                .get(spreadsheetId=self.spreadsheet_id, range=range_str)
-                .execute()
-            )
+            self._throttle_read()
+
+            def _rg():
+                return (
+                    self.sheet.values()
+                    .get(spreadsheetId=self.spreadsheet_id, range=range_str)
+                    .execute()
+                )
+
+            result = self._execute_with_retry(_rg)
             values = result.get("values", [])
             logger.debug(f"Read {len(values)} rows from {range_str}")
             return values
-            
+
         except Exception as e:
             logger.error(f"Failed to read range {range_str}: {e}")
             return []

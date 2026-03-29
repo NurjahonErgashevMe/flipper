@@ -32,10 +32,11 @@ logger = logging.getLogger(__name__)
 
 import argparse
 
+
 async def main(args):
     """Главная функция оркестратора."""
-    log_section(f"Starting Parser Cian Service (Mode: {args.mode})")
-    
+    log_section(f"Starting Parser Cian Service (mode={args.mode}, skip_links={args.skip_links})")
+
     try:
         # === STEP 1: Validate Configuration ===
         log_section("Step 1: Configuration Validation")
@@ -43,10 +44,11 @@ async def main(args):
 
         # === STEP 2: Initialize Components ===
         log_section("Step 2: Initializing Components")
-        
-        logger.info("Initializing SQLite Database...")
+
         import os
         os.makedirs("data", exist_ok=True)
+
+        logger.info("Initializing SQLite Database...")
         db_repo = DatabaseRepository(db_path="data/parser_cian.db")
         await db_repo.init_db()
         logger.info("✓ Database initialized")
@@ -56,10 +58,14 @@ async def main(args):
         logger.info("✓ Sheets Manager initialized")
 
         logger.info("Initializing Firecrawl Parser...")
-        parser = AdParser(cookie_manager_url=settings.cookie_manager_url)
+        parser = AdParser(
+            cookie_manager_url=settings.cookie_manager_url,
+            firecrawl_base_url=settings.firecrawl_base_url,
+            firecrawl_api_key=settings.firecrawl_api_key,
+        )
         logger.info("✓ Parser initialized")
 
-        logger.info(f"Initializing Queue Manager (concurrency: {settings.parser_concurrency}, mode: {args.mode})...")
+        logger.info(f"Initializing Queue Manager (concurrency={settings.parser_concurrency}, mode={args.mode})...")
         queue_manager = QueueManager(
             parser=parser,
             sheets_manager=sheets_manager,
@@ -69,72 +75,78 @@ async def main(args):
         )
         logger.info("✓ Queue Manager initialized")
 
-        # === STEP 3: Setup Search URLs ===
-        log_section(f"Step 3: Setup Search URLs ({args.mode} mode)")
-        
-        if args.mode == "regular":
-            logger.info("Reading search URLs from 'FILTERS' tab...")
-            search_urls = sheets_manager.get_urls(tab_name="FILTERS", column="A")
-            
-            if search_urls:
-                await db_repo.add_filters(search_urls)
-                logger.info(f"✓ Synced {len(search_urls)} search URLs to DB")
-                
-            saved_filters = await db_repo.get_all_filters()
-            if not saved_filters:
-                logger.warning("No search URLs found in DB or FILTERS tab")
-                logger.info("Exiting gracefully")
-                return
-    
-            active_search_urls = [f["url"] for f in saved_filters]
-            max_pages_limit = 50
+        source = args.mode  # "regular" или "avans"
+
+        if args.skip_links:
+            # --skip-links: пропускаем сбор ссылок, берём из БД то что уже есть
+            log_section(f"Step 3-4: SKIPPED (--skip-links), loading from DB (source={source})")
+            active_ad_urls = await db_repo.get_all_active_ads(source=source)
         else:
-            # avans mode
-            logger.info("Using Avans search URL from config...")
-            active_search_urls = [settings.avans_search_url]
-            max_pages_limit = settings.avans_max_pages
+            # === STEP 3: Setup Search URLs ===
+            log_section(f"Step 3: Setup Search URLs ({args.mode} mode)")
 
-        logger.info(f"✓ Found {len(active_search_urls)} active search URLs")
+            if args.mode == "regular":
+                logger.info("Reading search URLs from 'FILTERS' tab...")
+                search_urls = sheets_manager.get_urls(tab_name="FILTERS", column="A")
 
-        # === STEP 4: Extract Ad URLs from Search Pages ===
-        log_section("Step 4: Extracting Ad URLs from Search Pages")
-        
-        logger.info(f"Extracting ad URLs from {len(active_search_urls)} search pages (max {max_pages_limit} pages deep)...")
-        all_new_ad_urls = extract_batch_from_searches(
-            search_urls=active_search_urls,
-            location="Москва",
-            max_pages=max_pages_limit,
-            http_proxy=settings.http_proxy if settings.http_proxy else None
-        )
-        
-        if all_new_ad_urls:
-            await db_repo.add_ad_urls(all_new_ad_urls)
-            logger.info(f"✓ Synced {len(all_new_ad_urls)} newly extracted ad URLs to DB")
+                if search_urls:
+                    await db_repo.add_filters(search_urls)
+                    logger.info(f"✓ Synced {len(search_urls)} search URLs to DB")
 
-        # Fetch all active ads from DB to parse
-        active_ad_urls = await db_repo.get_all_active_ads()
-        
+                saved_filters = await db_repo.get_all_filters()
+                if not saved_filters:
+                    logger.warning("No search URLs found in DB or FILTERS tab")
+                    logger.info("Exiting gracefully")
+                    return
+
+                active_search_urls = [f["url"] for f in saved_filters]
+                max_pages_limit = 50
+            else:
+                logger.info("Using Avans search URL from config...")
+                active_search_urls = [settings.avans_search_url]
+                max_pages_limit = settings.avans_max_pages
+
+            logger.info(f"✓ Found {len(active_search_urls)} active search URLs")
+
+            # === STEP 4: Extract Ad URLs from Search Pages ===
+            log_section("Step 4: Extracting Ad URLs from Search Pages")
+
+            logger.info(f"Extracting ad URLs from {len(active_search_urls)} search pages (max {max_pages_limit} pages deep)...")
+
+            all_new_ad_urls = extract_batch_from_searches(
+                search_urls=active_search_urls,
+                location="Москва",
+                max_pages=max_pages_limit,
+                http_proxy=None,
+            )
+
+            if all_new_ad_urls:
+                await db_repo.add_ad_urls(all_new_ad_urls, source=source)
+                logger.info(f"✓ Synced {len(all_new_ad_urls)} newly extracted ad URLs to DB (source={source})")
+
+            active_ad_urls = await db_repo.get_all_active_ads(source=source)
+
         if not active_ad_urls:
-            logger.warning("No active ad URLs found in DB for parsing")
+            logger.warning(f"No active ad URLs found in DB for source={source}")
             logger.info("Exiting gracefully")
             return
-            
-        logger.info(f"✓ Total active ad URLs from DB ready to parse: {len(active_ad_urls)}")
+
+        logger.info(f"✓ Total active ad URLs ready to parse: {len(active_ad_urls)} (source={source})")
 
         # === STEP 5: Parse Ad URLs ===
         log_section("Step 5: Parsing Individual Ads")
-        
+
         logger.info(f"Starting asynchronous parsing of {len(active_ad_urls)} ad URLs...")
         stats = await queue_manager.run(active_ad_urls)
 
         # === STEP 6: Report Results ===
         log_section("Step 6: Execution Summary")
-        
+
         logger.info(f"Total URLs processed:  {stats['total']}")
         logger.info(f"Successfully parsed:   {stats['processed']}")
         logger.info(f"Errors encountered:    {stats['errors']}")
         logger.info(f"Success rate:          {stats['success_rate']}%")
-        
+
         logger.info("✓ Parser Cian Service completed successfully")
 
     except Exception as e:
@@ -145,11 +157,17 @@ async def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Parser Cian Service")
     parser.add_argument(
-        "--mode", 
-        type=str, 
-        choices=["regular", "avans"], 
+        "--mode",
+        type=str,
+        choices=["regular", "avans"],
         default="regular",
-        help="Режим работы: regular (фильтры) или avans (ссылка из конфига)"
+        help="Режим работы: regular (фильтры из Sheets) или avans (статичная ссылка)",
+    )
+    parser.add_argument(
+        "--skip-links",
+        action="store_true",
+        default=False,
+        help="Пропустить сбор ссылок (шаги 3-4), парсить только то что уже есть в БД",
     )
     args = parser.parse_args()
 

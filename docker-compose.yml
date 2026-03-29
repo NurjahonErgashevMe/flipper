@@ -1,3 +1,17 @@
+# Прокси из .env (PROXY_*, HTTP_PROXY, …) нужны только cookie_manager.
+# Остальные сервисы с env_file получают эти переменные обнулённые ниже.
+x-strip-proxy-env: &strip-proxy-env
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  http_proxy: ""
+  https_proxy: ""
+  ALL_PROXY: ""
+  all_proxy: ""
+  PROXY_SERVER: ""
+  PROXY_USERNAME: ""
+  PROXY_PASSWORD: ""
+  CHANGE_IP_URL: ""
+
 services:
   html_to_markdown:
     build:
@@ -53,8 +67,18 @@ services:
     container_name: parser_cian
     env_file:
       - .env
+    # Decodo Scraper API: DECODO_AUTH_TOKEN (Basic) в .env — списки в CianParser
+    # HTML_TO_MARKDOWN_URL=http://html_to_markdown:8080 — для fetch_html_and_markdown в cianparser
+    #
+    # Firecrawl: имя flippercrawl-api-1 из другого compose часто НЕ резолвится в DNS → Errno -2.
+    # По умолчанию — хост с опубликованным портом 3002 (как у test_parser с localhost).
+    # Своя сеть: в .env задайте PARSER_FIRECRAWL_BASE_URL=http://flippercrawl-api-1:3002 (или имя сервиса из их compose).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      - TZ=Europe/Moscow
+      TZ: Europe/Moscow
+      <<: *strip-proxy-env
+      FIRECRAWL_BASE_URL: "${PARSER_FIRECRAWL_BASE_URL:-http://host.docker.internal:3002}"
     volumes:
       - ./credentials.json:/app/credentials.json
       - ./data:/app/data
@@ -65,6 +89,7 @@ services:
         condition: service_healthy
     networks:
       - flipper_network
+      - firecrawl_backend  # Прямой доступ к Firecrawl-контейнеру
     profiles:
       - manual  # Запускается только вручную
 
@@ -76,8 +101,9 @@ services:
     env_file:
       - .env
     environment:
-      - TZ=Europe/Moscow
-      - PYTHONPATH=/app
+      TZ: Europe/Moscow
+      PYTHONPATH: /app
+      <<: *strip-proxy-env
     volumes:
       - ./credentials.json:/app/credentials.json
     depends_on:
@@ -105,5 +131,7 @@ services:
 networks:
   flipper_network:
     driver: bridge
+  firecrawl_backend:
+    external: true  # Сеть создана firecrawl docker-compose
 
 volumes: {}

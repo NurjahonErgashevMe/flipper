@@ -3,9 +3,9 @@ import os
 import sys
 import logging
 import json
+import httpx
 from dotenv import load_dotenv
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -14,145 +14,271 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Добавляем папку сервиса в пути поиска Python, 
-# чтобы внутренние импорты парсера работали без ошибок
 current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(current_dir, 'services', 'parser_cian'))
+sys.path.append(os.path.join(current_dir, "services", "parser_cian"))
 
-from services.parser_cian.parser import AdParser
-from services.parser_cian.models import parse_to_sheets_row
-from packages.flipper_core.sheets import SheetsManager
-from services.parser_cian.queue_manager import check_signals, send_telegram_notification
-
-# Загружаем переменные из .env
 load_dotenv()
 
-async def test_ads():
-    if not os.getenv("FIRECRAWL_API_KEY"):
-        logger.error("❌ Ошибка: FIRECRAWL_API_KEY не установлен в .env")
-        return
+_DOCKER_TO_LOCAL = {
+    "FIRECRAWL_BASE_URL": ("flippercrawl-api-1", "localhost"),
+    "COOKIE_MANAGER_URL": ("cookie_manager", "localhost"),
+}
+for _env_key, (_docker_host, _local_host) in _DOCKER_TO_LOCAL.items():
+    _val = os.environ.get(_env_key, "")
+    if _docker_host in _val:
+        os.environ[_env_key] = _val.replace(_docker_host, _local_host)
 
-    # Инициализация Google Sheets Manager
-    sheets_manager = None
+FIRECRAWL_URL = (
+    os.getenv("FIRECRAWL_BASE_URL", "http://localhost:3002").rstrip("/") + "/v2/scrape"
+)
+FIRECRAWL_KEY = os.getenv("FIRECRAWL_API_KEY", "test-key")
+COOKIE_MANAGER_URL = os.getenv("COOKIE_MANAGER_URL", "http://localhost:8000").rstrip(
+    "/"
+)
+
+EXCLUDE_TAGS = [
+    "svg",
+    "img",
+    "script",
+    "style",
+    "footer",
+    "header",
+    "[data-name='CardSectionNew']",
+    "[data-name='OfferCardPageLayoutFooter']",
+    "[id='adfox-stretch-banner']",
+]
+
+JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "cian_id": {
+            "type": "string",
+            "description": "ID объявления из URL (число в конце /sale/flat/XXXXXX/)",
+        },
+        "price": {"type": "integer", "description": "Цена в рублях"},
+        "price_per_m2": {"type": "integer", "description": "Цена за м²"},
+        "title": {"type": "string", "description": "Заголовок объявления"},
+        "description": {"type": "string", "description": "Текст описания объявления"},
+        "address": {
+            "type": "object",
+            "properties": {
+                "full": {"type": "string", "description": "Полный адрес"},
+                "district": {"type": "string", "description": "Район"},
+                "metro_station": {
+                    "type": "string",
+                    "description": "Ближайшая станция метро",
+                },
+                "okrug": {"type": "string", "description": "Округ (ЦАО, ЮВАО и т.д.)"},
+            },
+        },
+        "area": {"type": "number", "description": "Общая площадь в м²"},
+        "rooms": {"type": "integer", "description": "Количество комнат"},
+        "housing_type": {
+            "type": "string",
+            "description": "Тип жилья (Вторичка, Новостройка)",
+        },
+        "floor_info": {
+            "type": "object",
+            "properties": {
+                "current": {"type": "integer", "description": "Этаж квартиры"},
+                "all": {"type": "integer", "description": "Всего этажей в доме"},
+            },
+        },
+        "construction_year": {"type": "integer", "description": "Год постройки дома"},
+        "renovation": {"type": "string", "description": "Тип ремонта"},
+        "metro_walk_time": {
+            "type": "integer",
+            "description": "Минут пешком до ближайшего метро",
+        },
+        "total_views": {
+            "type": "integer",
+            "description": "Всего просмотров — число ДО запятой в строке 'X просмотров, Y за сегодня'",
+        },
+        "unique_views": {
+            "type": "integer",
+            "description": "Просмотров сегодня — число ПОСЛЕ запятой в строке 'X просмотров, Y за сегодня'",
+        },
+        "is_active": {"type": "boolean", "description": "Активно ли объявление"},
+        "price_history": {
+            "type": "array",
+            "description": "История изменения цены (если есть раздел 'История цены')",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Дата изменения (например: '10 мар 2026')",
+                    },
+                    "price": {
+                        "type": "integer",
+                        "description": "Цена в рублях на эту дату",
+                    },
+                    "change_amount": {
+                        "type": "integer",
+                        "description": "На сколько изменилась цена (отрицательное = снижение). 0 для первой записи.",
+                    },
+                    "change_type": {
+                        "type": "string",
+                        "enum": ["initial", "decrease", "increase"],
+                        "description": "Тип изменения: initial (первая цена), decrease (снижение), increase (повышение)",
+                    },
+                },
+                "required": ["date", "price", "change_amount", "change_type"],
+            },
+        },
+    },
+    "required": ["cian_id", "price", "area"],
+}
+
+SYSTEM_PROMPT = (
+    "Экстрактор объявлений Cian.ru: заполни поля по схеме из markdown; нет данных — null. "
+    "Просмотры: в одной строке «X просмотров, Y за сегодня» — X→total_views, Y→unique_views. "
+    "is_active: true, если карточка доступна. "
+    "price_history: если есть раздел 'История цены' — заполни массив записей с date, price, "
+    "change_amount (0 для первой), change_type (initial/decrease/increase). Нет раздела — null."
+)
+
+
+async def get_cookies() -> str:
     try:
-        logger.info("📊 Инициализация Google Sheets Manager...")
-        creds_path = "credentials.json" if os.path.exists("credentials.json") else "/app/credentials.json"
-        sheets_manager = SheetsManager(credentials_path=creds_path)
-        logger.info("✅ Google Sheets Manager готов")
-    except (ValueError, FileNotFoundError) as e:
-        logger.warning(f"⚠️ Google Sheets не настроен: {e}")
-
-    # Подключаемся к менеджеру кук
-    logger.info("🔌 Подключаемся к Cookie Manager...")
-    parser = AdParser(cookie_manager_url="http://localhost:8000")
-    
-    urls_to_test = [
-        "https://www.cian.ru/sale/flat/326100259/", # Активное
-        "https://www.cian.ru/sale/flat/326002860/", # SOLD
-    ]
-    
-    for url in urls_to_test:
-        logger.info("\n" + "="*80)
-        logger.info(f"🧪 Тестируем парсинг URL: {url}")
-        logger.info("="*80)
-        
-        try:
-            data = await parser.parse_async(url)
-            
-            # Сохраняем данные в json
-            output_file = f"data_{data.cian_id}.json"
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(data.model_dump(mode='json'), f, ensure_ascii=False, indent=2)
-            
-            # Основная информация
-            logger.info(f"\n📋 Основная информация:")
-            logger.info(f"  🆔 Cian ID: {data.cian_id}")
-            logger.info(f"  💰 Цена: {data.price:,} руб." if data.price else "  💰 Цена: Не указана")
-            logger.info(f"  🟢 Статус активности: {'АКТИВНО' if data.is_active else 'SOLD (СНЯТО)'}")
-            
-            # Оценка Signals_Parser
-            price_history_dicts = [h.model_dump(mode='json') for h in data.price_history] if data.price_history else []
-            is_signal = check_signals(price_history_dicts)
-            logger.info(f"\n🚦 Подходит для Signals_Parser: {'✅ ДА' if is_signal else '❌ НЕТ'}")
-            
-            # Сохранение в Google Sheets
-            if sheets_manager:
-                if not data.is_active:
-                    tab_name = "SOLD"
-                    logger.info(f"💾 Пишем в таб {tab_name}...")
-                    row = parse_to_sheets_row(data)
-                    await asyncio.to_thread(sheets_manager.write_row, tab_name, row, insert_at_top=True)
-                else:
-                    row = parse_to_sheets_row(data)
-                    # Offers_Parser (Голубой если > 50 охват)
-                    off_bg = {"red": 0.8, "green": 0.9, "blue": 1.0} if (data.unique_views and data.unique_views >= 50) else None
-                    logger.info("💾 Пишем в Offers_Parser...")
-                    await asyncio.to_thread(sheets_manager.write_row, "Offers_Parser", row, insert_at_top=True, bg_color=off_bg)
-                    if off_bg:
-                        msg = f"🌟 <b>Offers_Parser Match! (TEST)</b>\nУникальных просмотров сегодня: {data.unique_views}\nЦена: {data.price} руб.\nСсылка: <a href='{url}'>{url}</a>"
-                        await send_telegram_notification(msg)
-                    
-                    # Signals_Parser (Желтый)
-                    if is_signal:
-                        sig_bg = {"red": 1.0, "green": 0.9, "blue": 0.7}
-                        logger.info("💾 Сигнал обнаружен! Пишем в Signals_Parser...")
-                        await asyncio.to_thread(sheets_manager.write_row, "Signals_Parser", row, insert_at_top=True, bg_color=sig_bg)
-                        msg = f"🚦 <b>Signals_Parser Match! (TEST)</b>\nСработало условие по снижению цены.\nЦена: {data.price} руб.\nСсылка: <a href='{url}'>{url}</a>"
-                        await send_telegram_notification(msg)
-            
-        except Exception as e:
-            logger.error(f"\n❌ ПРОВАЛ ПАРСИНГА для {url}: {e}", exc_info=True)
-
-    # ТЕСТ МОКОВОГО ОБЪЯВЛЕНИЯ ИЗ signaled_data.json
-    logger.info("\n" + "="*80)
-    logger.info(f"🧪 Тестируем МОК-ОБЪЯВЛЕНИЕ ИЗ signaled_data.json")
-    logger.info("="*80)
-    try:
-        from services.parser_cian.models import ParsedAdData
-        from services.parser_cian.config import settings
-        
-        filename = "signaled_data.json"
-        if not os.path.exists(filename):
-            logger.error(f"❌ Файл {filename} не найден!")
-        else:
-            with open(filename, "r", encoding="utf-8") as f:
-                json_data = json.load(f)
-            
-            # Валидируем данные через модель
-            mock_data = ParsedAdData.model_validate(json_data)
-            
-            logger.info(f"📋 Данные загружены для ID: {mock_data.cian_id} ({filename})")
-            logger.info(f"💰 Цена: {mock_data.price:,} руб.")
-            logger.info(f"👁️ Уникальные просмотры: {mock_data.unique_views}")
-            
-            # Проверка сигналов
-            price_history_dicts = [h.model_dump(mode='json') for h in mock_data.price_history] if mock_data.price_history else []
-            is_signal = check_signals(price_history_dicts)
-            logger.info(f"🚦 Подходит для Signals_Parser: {'✅ ДА' if is_signal else '❌ НЕТ'}")
-            
-            if sheets_manager:
-                row_mock = parse_to_sheets_row(mock_data)
-                
-                # Offers_Parser
-                off_bg = settings.sheet_highlight_color if (mock_data.unique_views and mock_data.unique_views >= settings.min_unique_views) else None
-                logger.info(f"💾 Пишем МОК в Offers_Parser (Highlights: {'ДА' if off_bg else 'НЕТ'})...")
-                await asyncio.to_thread(sheets_manager.find_and_update_row, "Offers_Parser", row_mock, id_value=mock_data.cian_id, id_column_index=20, bg_color=off_bg)
-                if off_bg:
-                    msg = f"🌟 <b>Offers_Parser Match! (MOCK)</b>\nУникальных просмотров сегодня: {mock_data.unique_views}\nЦена: {mock_data.price} руб."
-                    await send_telegram_notification(msg)
-                
-                # Signals_Parser
-                if is_signal:
-                    sig_bg = settings.sheet_highlight_color
-                    logger.info("💾 Пишем МОК в Signals_Parser...")
-                    await asyncio.to_thread(sheets_manager.find_and_update_row, "Signals_Parser", row_mock, id_value=mock_data.cian_id, id_column_index=20, bg_color=sig_bg)
-                    msg = f"🚦 <b>Signals_Parser Match! (MOCK)</b>\nСработало условие по снижению цены.\nЦена: {mock_data.price} руб."
-                    await send_telegram_notification(msg)
-                
-                logger.info("✅ Тест мок-данных успешно завершен")
-                
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{COOKIE_MANAGER_URL}/cookies")
+            if resp.status_code == 200:
+                cookies = resp.json()
+                return "; ".join(f"{c['name']}={c['value']}" for c in cookies)
     except Exception as e:
-        logger.error(f"❌ Ошибка при тесте мок-данных: {e}", exc_info=True)
+        logger.warning(f"Cookie Manager недоступен: {e}")
+    return ""
+
+
+def build_payload(url: str, cookies_str: str) -> dict:
+    payload = {
+        "url": url,
+        "excludeTags": EXCLUDE_TAGS,
+        "formats": [
+            "markdown",
+            {
+                "type": "json",
+                "schema": JSON_SCHEMA,
+                "systemPrompt": SYSTEM_PROMPT,
+            },
+        ],
+    }
+    if cookies_str:
+        payload["headers"] = {"Cookie": cookies_str}
+    return payload
+
+
+CONCURRENCY = 20
+
+
+async def scrape_ad(
+    client: httpx.AsyncClient, url: str, cookies_str: str, worker_id: int
+) -> dict:
+    payload = build_payload(url, cookies_str)
+    headers = {
+        "Authorization": f"Bearer {FIRECRAWL_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    logger.info(f"[Worker-{worker_id}] Отправляю: {url}")
+    resp = await client.post(FIRECRAWL_URL, json=payload, headers=headers)
+
+    if resp.status_code != 200:
+        raise ValueError(f"Firecrawl {resp.status_code}: {resp.text[:300]}")
+
+    result = resp.json()
+    if not result.get("success"):
+        raise ValueError(
+            f"Firecrawl success=false: {json.dumps(result, ensure_ascii=False)[:300]}"
+        )
+
+    return result.get("data", {})
+
+
+def log_result(url: str, data: dict, worker_id: int) -> None:
+    cian_id = url.rstrip("/").split("/")[-1]
+    output_file = f"data_{cian_id}.json"
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    jd = data.get("json") or {}
+    md_len = len(data.get("markdown") or "")
+    ph = jd.get("price_history")
+    ph_info = f"{len(ph)} записей" if ph else "нет"
+    logger.info(
+        f"[Worker-{worker_id}] OK {cian_id}: "
+        f"md={md_len}, price={jd.get('price')}, area={jd.get('area')}, "
+        f"rooms={jd.get('rooms')}, views={jd.get('total_views')}/{jd.get('unique_views')}, "
+        f"active={jd.get('is_active')}, price_history={ph_info}"
+    )
+
+
+async def worker(
+    queue: asyncio.Queue,
+    client: httpx.AsyncClient,
+    cookies_str: str,
+    worker_id: int,
+    stats: dict,
+):
+    while True:
+        url = await queue.get()
+        try:
+            data = await scrape_ad(client, url, cookies_str, worker_id)
+            log_result(url, data, worker_id)
+            stats["ok"] += 1
+        except Exception as e:
+            logger.error(f"[Worker-{worker_id}] FAIL {url}: {e}")
+            stats["fail"] += 1
+        finally:
+            queue.task_done()
+
+
+async def test_ads():
+    urls_to_test = [
+        "https://www.cian.ru/sale/flat/322869278/",
+        "https://www.cian.ru/sale/flat/315780538/",
+        "https://www.cian.ru/sale/flat/318732851/",
+        "https://www.cian.ru/sale/flat/324878007/",
+        "https://www.cian.ru/sale/flat/321180048/",
+        "https://www.cian.ru/sale/flat/324638002/",
+        "https://www.cian.ru/sale/flat/327524113/",
+        "https://www.cian.ru/sale/flat/269645973/",
+        "https://www.cian.ru/sale/flat/326240888/",
+        "https://www.cian.ru/sale/flat/326545702/",
+        "https://www.cian.ru/sale/flat/327625128/",
+        "https://www.cian.ru/sale/flat/327585685/",
+        "https://www.cian.ru/sale/flat/327845533/",
+        "https://www.cian.ru/sale/flat/322231937/",
+    ]
+
+    cookies_str = await get_cookies()
+    logger.info(f"Куки: {'есть' if cookies_str else 'нет'}")
+    logger.info(
+        f"URL-ов: {len(urls_to_test)}, воркеров: {min(CONCURRENCY, len(urls_to_test))}"
+    )
+
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    for u in urls_to_test:
+        queue.put_nowait(u)
+
+    stats = {"ok": 0, "fail": 0}
+    num_workers = min(CONCURRENCY, len(urls_to_test))
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        workers = [
+            asyncio.create_task(worker(queue, client, cookies_str, i, stats))
+            for i in range(num_workers)
+        ]
+        await queue.join()
+        for w in workers:
+            w.cancel()
+
+    logger.info("=" * 60)
+    logger.info(
+        f"Готово: OK={stats['ok']}, FAIL={stats['fail']}, всего={stats['ok'] + stats['fail']}"
+    )
+
 
 if __name__ == "__main__":
     asyncio.run(test_ads())

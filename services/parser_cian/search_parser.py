@@ -16,7 +16,8 @@ def extract_ad_urls_from_search(
     search_url: str,
     location: str = "Москва",
     max_pages: int = 50,
-    http_proxy: str = None
+    http_proxy: str = None,
+    list_html_loader=None,
 ) -> List[str]:
     """
     Извлекает ссылки на объявления из поисковой страницы Cian.
@@ -25,8 +26,9 @@ def extract_ad_urls_from_search(
         search_url: URL поисковой страницы (например, с фильтрами)
         location: Город (по умолчанию "Москва")
         max_pages: Максимальное количество страниц пагинации для парсинга (по умолчанию 50)
-        http_proxy: URL прокси (если нужно)
-        
+        http_proxy: URL прокси для прямых запросов (если Decodo из env не подключился)
+        list_html_loader: явный загрузчик HTML; иначе CianParser сам пробует Decodo из env (приоритет над прокси)
+
     Returns:
         Список URLs объявлений
         
@@ -52,7 +54,8 @@ def extract_ad_urls_from_search(
         proxies = [http_proxy] if http_proxy else None
         parser = cianparser.CianParser(
             location=location,
-            proxies=proxies
+            proxies=proxies,
+            list_html_loader=list_html_loader,
         )
         
         all_urls = set()
@@ -121,7 +124,8 @@ def extract_batch_from_searches(
     location: str = "Москва",
     max_pages: int = 50,
     http_proxy: str = None,
-    change_ip_callback=None
+    change_ip_callback=None,
+    list_html_loader=None,
 ) -> List[str]:
     """
     Извлекает ссылки из нескольких поисковых страниц.
@@ -132,7 +136,8 @@ def extract_batch_from_searches(
         max_pages: Максимальное количество страниц для каждой поисковой ссылки
         http_proxy: URL прокси
         change_ip_callback: Функция для смены IP перед каждой страницей
-        
+        list_html_loader: callable(url) -> str — внешняя загрузка HTML списков
+
     Returns:
         Объединенный список всех извлеченных ссылок объявлений
     """
@@ -153,7 +158,8 @@ def extract_batch_from_searches(
                 search_url=search_url,
                 location=location,
                 max_pages=max_pages,
-                http_proxy=http_proxy
+                http_proxy=http_proxy,
+                list_html_loader=list_html_loader,
             )
             all_ad_urls.extend(urls)
             logger.info(f"Added {len(urls)} URLs from search page {i}")

@@ -7,7 +7,6 @@ services.parser_cian.config - Settings and configuration
 
 import os
 import logging
-from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,6 +26,24 @@ class Settings(BaseSettings):
     firecrawl_api_key: str = ""
     """API ключ для Firecrawl (обязательно)"""
 
+    firecrawl_base_url: str = "http://localhost:3002"
+    """Self-hosted Firecrawl (без /v2/scrape). В Docker: http://flippercrawl-api-1:3002"""
+
+    # === Decodo Scraper API (HTML списков объявлений, обход бана IP) ===
+    # Подключение: CianParser сам читает DECODO_* из окружения (приоритет над прокси для списков).
+
+    decodo_scraper_url: str = "https://scraper-api.decodo.com/v2/scrape"
+    """Endpoint v2/scrape"""
+
+    decodo_auth_token: str = ""
+    """Decodo Scraper API: base64 для заголовка Authorization: Basic <token> (как в кабинете)"""
+
+    decodo_max_retries: int = 5
+    """Повторы запроса при капче/битом HTML"""
+
+    html_to_markdown_url: str = ""
+    """Базовый URL сервиса go-html-to-md (например http://html_to_markdown:8080). Пусто — markdown не тянем из Decodo-потока."""
+
     # === Cookie Manager ===
     cookie_manager_url: str = "http://cookie_manager:8000"
     """URL микросервиса управления куками
@@ -34,26 +51,14 @@ class Settings(BaseSettings):
     Для Docker: http://cookie_manager:8000 (имя сервиса в docker-compose)
     """
 
-    # === Proxy Settings (мобильный прокси для смены IP) ===
-    proxy_username: str = ""
-    """Username для мобильного прокси"""
-
-    proxy_password: str = ""
-    """Password для мобильного прокси"""
-
-    change_ip_url: str = ""
-    """URL endpoint для смены IP адреса (например: http://proxy.local:8080/changeip)"""
-
-    http_proxy: str = ""
-    """Полный URL прокси в формате: http://user:pass@host:port"""
-
     # === Logging ===
     log_level: str = "INFO"
     """Уровень логирования: DEBUG, INFO, WARNING, ERROR, CRITICAL"""
 
     # === Parser Settings ===
-    parser_concurrency: int = 2
-    """Количество одновременных воркеров для парсинга (защита от rate limits)"""
+    parser_concurrency: int = 20
+    """Параллельных воркеров к Firecrawl (PARSER_CONCURRENCY в .env).
+    Лимит инстанса flippercrawl-api; при ReadTimeout уменьшите. Google Sheets — max ~60 read/min (SHEETS_READ_SPACING_SEC)."""
 
     min_unique_views: int = 200
     """Минимальное количество уникальных просмотров за сегодня для выделения цветом (Offers_Parser)"""
@@ -85,15 +90,28 @@ class Settings(BaseSettings):
     def __init__(self, **data):
         super().__init__(**data)
 
-        # Валидация обязательных полей
         if not self.firecrawl_api_key:
             raise ValueError(
                 "FIRECRAWL_API_KEY не установлена в .env файле. "
                 "Получите ключ на https://firecrawl.dev"
             )
 
+        self._push_decodo_to_environ()
+
         logger.info(f"Settings loaded from {self.model_config['env_file']}")
         logger.debug(f"Cookie Manager URL: {self.cookie_manager_url}")
+
+    def _push_decodo_to_environ(self) -> None:
+        """Pydantic Settings загружает .env в поля, но не в os.environ.
+        CianParser.decodo_scraper читает os.environ — синхронизируем."""
+        _pairs = [
+            ("DECODO_AUTH_TOKEN", (self.decodo_auth_token or "").strip()),
+            ("DECODO_SCRAPER_URL", (self.decodo_scraper_url or "").strip()),
+            ("DECODO_MAX_RETRIES", str(self.decodo_max_retries)),
+        ]
+        for key, val in _pairs:
+            if val and not os.environ.get(key, "").strip():
+                os.environ[key] = val
 
 
 # Глобальный экземпляр конфигурации
@@ -127,3 +145,5 @@ def get_settings() -> Settings:
         Settings instance
     """
     return settings
+
+

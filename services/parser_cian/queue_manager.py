@@ -120,7 +120,8 @@ class QueueManager:
         Worker процесс:
         1. Парсит URL
         2. Если продано -> SQLite (sold) + Sheets (SOLD)
-        3. Если активно -> SQLite (active) + Sheets (Offers_Parser, Signals_Parser) с цветами.
+        3. Если активно -> SQLite (active) + Offers_Parser (все, цвет при пороге просмотров);
+           Signals_Parser только при сигнале по цене, иначе строка удаляется из листа.
         """
         while True:
             url = await self.queue.get()
@@ -177,8 +178,12 @@ class QueueManager:
                             )
                     else:
                         # Режим 'regular'
+                        # Offers_Parser: все активные объявления; цвет только при пороге просмотров
                         offers_color = None
-                        if parsed_data.unique_views and parsed_data.unique_views >= settings.min_unique_views:
+                        if (
+                            parsed_data.unique_views is not None
+                            and parsed_data.unique_views >= settings.min_unique_views
+                        ):
                             offers_color = settings.sheet_highlight_color
                             msg = (
                                 f"🌟 <b>Offers_Parser Match!</b>\n\n"
@@ -186,36 +191,31 @@ class QueueManager:
                                 f"Цена: {parsed_data.price} руб.\n"
                                 f"Ссылка: <a href='{url}'>{url}</a>"
                             )
-                            # Запукаем отправку не блокируя воркер
                             asyncio.create_task(send_telegram_notification(msg))
-                            
-                        signals_color = None
-                        if check_signals(parsed_dict.get("price_history", [])):
-                            signals_color = settings.sheet_highlight_color
-                            msg = (
+
+                        signals_match = check_signals(parsed_dict.get("price_history", []))
+                        if signals_match:
+                            msg_sig = (
                                 f"🚦 <b>Signals_Parser Match!</b>\n\n"
                                 f"Сработало условие по снижению цены (более 3 раз за 30 дней и падение >= 5%).\n"
                                 f"Цена: {parsed_data.price} руб.\n"
                                 f"Ссылка: <a href='{url}'>{url}</a>"
                             )
-                            asyncio.create_task(send_telegram_notification(msg))
-                            
+                            asyncio.create_task(send_telegram_notification(msg_sig))
+
                         async with self._sheets_lock:
-                            # Offers_Parser
-                            success1 = await loop.run_in_executor(
+                            success_offers = await loop.run_in_executor(
                                 None,
-                                lambda: self.sheets_manager.find_and_update_row(
-                                    "Offers_Parser", row, id_value=parsed_data.cian_id, id_column_index=20, bg_color=offers_color
-                                )
+                                lambda: self.sheets_manager.sync_offers_and_signals(
+                                    row,
+                                    str(parsed_data.cian_id),
+                                    20,
+                                    offers_color,
+                                    signals_match,
+                                    settings.sheet_highlight_color,
+                                ),
                             )
-                            # Signals_Parser
-                            success2 = await loop.run_in_executor(
-                                None,
-                                lambda: self.sheets_manager.find_and_update_row(
-                                    "Signals_Parser", row, id_value=parsed_data.cian_id, id_column_index=20, bg_color=signals_color
-                                )
-                            )
-                        success = success1 or success2
+                        success = success_offers
 
                 if success:
                     logger.info(f"✅ [Worker-{worker_id}] Успешно обработано: {url} | ID: {parsed_data.cian_id}")

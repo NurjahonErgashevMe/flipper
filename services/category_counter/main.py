@@ -1,6 +1,5 @@
 """Main entry point for category counter service."""
 
-import os
 import sys
 import logging
 from datetime import datetime
@@ -21,17 +20,8 @@ logger = logging.getLogger(__name__)
 
 def main():
     """Run category counter parser."""
-    logger.info("Starting category counter parser...")
-    
-    # Get HTTP proxy from env (mobile proxy with IP rotation)
-    http_proxy = os.getenv("HTTP_PROXY", "")
-    
-    if http_proxy:
-        logger.info(f"Using mobile proxy: {http_proxy.split('@')[1] if '@' in http_proxy else http_proxy}")
-    else:
-        logger.info("No proxy configured, using direct connection")
-    
-    parser = CategoryCounterParser(http_proxy=http_proxy if http_proxy else None)
+    logger.info("Starting category counter parser (direct HTTP; proxy только в cookie_manager)...")
+    parser = CategoryCounterParser(http_proxy=None)
     
     # Parse all categories
     logger.info("Parsing all categories...")

@@ -24,5 +24,5 @@ COPY services/parser_cian/ ./services/parser_cian/
 # Добавляем корень проекта в пути поиска Python
 ENV PYTHONPATH="/app:/app/services"
 
-# Запускаем оркестратор
-CMD ["python", "-m", "services.parser_cian.main"]
+# ENTRYPOINT чтобы docker compose run ... --skip-links --mode avans прокидывались
+ENTRYPOINT ["python", "-m", "services.parser_cian.main"]
