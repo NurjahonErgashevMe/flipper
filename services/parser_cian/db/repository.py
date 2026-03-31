@@ -56,6 +56,34 @@ class DatabaseRepository:
                 await session.execute(stmt)
             await session.commit()
 
+    async def sync_filters_exact(self, urls: List[str]) -> None:
+        """
+        Таблица cian_filters = ровно список с листа FILTERS.
+        Удаляет строки, которых больше нет в листе; добавляет новые URL.
+        """
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for u in urls:
+            if not u:
+                continue
+            s = str(u).strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            normalized.append(s)
+
+        async with _base.AsyncSessionLocal() as session:
+            if not normalized:
+                await session.execute(delete(CianFilter))
+            else:
+                await session.execute(
+                    delete(CianFilter).where(CianFilter.url.not_in(normalized))
+                )
+            for url in normalized:
+                stmt = sqlite_insert(CianFilter).values(url=url).on_conflict_do_nothing()
+                await session.execute(stmt)
+            await session.commit()
+
     async def get_all_filters(self) -> List[Dict]:
         """Возвращает все фильтры."""
         async with _base.AsyncSessionLocal() as session:
@@ -78,6 +106,37 @@ class DatabaseRepository:
                 await session.execute(stmt)
             await session.commit()
         logger.debug(f"add_ad_urls: added up to {len(urls)} URLs (source={source})")
+
+    async def replace_active_ad_urls(self, urls: List[str], source: str = "regular") -> None:
+        """
+        Полностью заменяет активные объявления для данного source (как после обхода FILTERS).
+        """
+        ordered_unique: List[str] = []
+        seen: set[str] = set()
+        for u in urls:
+            if not u:
+                continue
+            s = str(u).strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            ordered_unique.append(s)
+
+        async with _base.AsyncSessionLocal() as session:
+            await session.execute(
+                delete(CianActiveAd).where(CianActiveAd.source == source)
+            )
+            for url in ordered_unique:
+                stmt = (
+                    sqlite_insert(CianActiveAd)
+                    .values(url=url, filter_id=None, source=source)
+                    .on_conflict_do_nothing()
+                )
+                await session.execute(stmt)
+            await session.commit()
+        logger.info(
+            f"replace_active_ad_urls: source={source}, {len(ordered_unique)} URLs"
+        )
 
     async def get_all_active_ads(self, source: Optional[str] = None) -> List[str]:
         """Получает URL активных объявлений, опционально фильтруя по source."""

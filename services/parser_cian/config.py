@@ -55,10 +55,30 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     """Уровень логирования: DEBUG, INFO, WARNING, ERROR, CRITICAL"""
 
+    parser_cian_log_file: str = Field(
+        default="data/logs/parser_cian.log",
+        description="Файл логов; пустая строка — только консоль (PARSER_CIAN_LOG_FILE в .env)",
+    )
+
     # === Parser Settings ===
     parser_concurrency: int = 20
     """Параллельных воркеров к Firecrawl (PARSER_CONCURRENCY в .env).
     Лимит инстанса flippercrawl-api; при ReadTimeout уменьшите. Google Sheets — max ~60 read/min (SHEETS_READ_SPACING_SEC)."""
+
+    regular_search_max_pages: int = Field(
+        default=100,
+        ge=1,
+        le=500,
+        description="Макс. страниц списка на один URL из FILTERS (PARSER_REGULAR_MAX_PAGES). Раньше 50 — обрезало выдачи >50 стр.",
+    )
+
+    search_duplicate_streak_stop: int = Field(
+        default=2,
+        ge=1,
+        le=20,
+        description="Остановить пагинацию после N подряд страниц без новых ссылок (PARSER_SEARCH_DUPLICATE_STREAK_STOP). "
+        "1 = как раньше (частый обрыв при ложном дубле p=2 из-за капчи/Decodo).",
+    )
 
     min_unique_views: int = 200
     """Минимальное количество уникальных просмотров за сегодня для выделения цветом (Offers_Parser)"""
@@ -68,7 +88,7 @@ class Settings(BaseSettings):
         default="https://www.cian.ru/cat.php?context=%D0%92%D0%BD%D0%B5%D1%81%D0%BB%D0%B8+%D0%B0%D0%B2%D0%B0%D0%BD%D1%81%7C%D0%B2%D0%BD%D0%B5%D1%81%D0%B5%D0%BD+%D0%B0%D0%B2%D0%B0%D0%BD%D1%81%7C%D0%B2%D0%BD%D0%B5%D1%81%D0%B5%D0%BD+%D0%B7%D0%B0%D0%B4%D0%B0%D1%82%D0%BE%D0%BA%7C%D0%B2%D0%BD%D0%B5%D1%81%D0%BB%D0%B8+%D0%B7%D0%B0%D0%B4%D0%B0%D1%82%D0%BE%D0%BA&deal_type=sale&demolished_in_moscow_programm=0&electronic_trading=2&engine_version=2&flat_share=2&is_first_floor=0&m2=1&object_type%5B0%5D=1&offer_type=flat&only_flat=1&region=1&room1=1&room2=1&room3=1&room4=1&room5=1&room6=1",
         description="Ссылка для парсинга активных авансов (статичная с кучей фильтров)"
     )
-    avans_max_pages: int = Field(default=2, description="Количество страниц для парсинга авансов")
+    avans_max_pages: int = Field(default=100, description="Количество страниц для парсинга авансов")
 
     # Telegram Notification Settings
     tg_bot_token: str = Field(default="", description="Токен Telegram бота")

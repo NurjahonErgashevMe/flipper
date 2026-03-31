@@ -3,6 +3,9 @@ services.parser_cian.db.base - SQLAlchemy models and engine
 """
 
 import json
+import logging
+import os
+import sqlite3
 from datetime import datetime
 from typing import Any
 
@@ -22,6 +25,8 @@ from sqlalchemy import (
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base, relationship
+
+logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
@@ -86,12 +91,31 @@ def init_engine(db_path: str = "data/parser_cian.db"):
         connect_args={"timeout": 30.0},
     )
 
+    allowed_journal = frozenset(
+        {"WAL", "DELETE", "TRUNCATE", "MEMORY", "OFF", "PERSIST"}
+    )
+
     @event.listens_for(engine.sync_engine, "connect")
     def _sqlite_pragmas(dbapi_connection, connection_record):
         cur = dbapi_connection.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA synchronous=NORMAL")
-        cur.execute("PRAGMA busy_timeout=10000")
+        # WAL на bind-mount с хоста Windows (Docker Desktop) часто даёт disk I/O error
+        # даже на PRAGMA journal_mode=DELETE. Надёжнее: named volume для /app/data в compose.
+        jm = (os.environ.get("CIAN_SQLITE_JOURNAL_MODE") or "WAL").strip().upper()
+        if jm not in allowed_journal:
+            jm = "WAL"
+        try:
+            cur.execute(f"PRAGMA journal_mode={jm}")
+        except sqlite3.OperationalError as e:
+            logger.warning(
+                "PRAGMA journal_mode=%s не применён (%s); используется текущий режим SQLite",
+                jm,
+                e,
+            )
+        try:
+            cur.execute("PRAGMA synchronous=NORMAL")
+            cur.execute("PRAGMA busy_timeout=10000")
+        except sqlite3.OperationalError as e:
+            logger.warning("PRAGMA synchronous/busy_timeout не применены: %s", e)
         cur.close()
 
     AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)

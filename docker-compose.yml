@@ -79,8 +79,12 @@ services:
       TZ: Europe/Moscow
       <<: *strip-proxy-env
       FIRECRAWL_BASE_URL: "${PARSER_FIRECRAWL_BASE_URL:-http://host.docker.internal:3002}"
+      # SQLite WAL на ./data с Windows часто даёт disk I/O — DELETE стабильнее для bind-mount
+      CIAN_SQLITE_JOURNAL_MODE: "${CIAN_SQLITE_JOURNAL_MODE:-DELETE}"
     volumes:
       - ./credentials.json:/app/credentials.json
+      # Тот же ./data, что в репозитории (parser_cian.db виден на хосте). Если снова I/O error —
+      # временно замените на named volume parser_cian_data:/app/data и скопируйте БД docker cp.
       - ./data:/app/data
     depends_on:
       cookie_manager:

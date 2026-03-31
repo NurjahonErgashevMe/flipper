@@ -17,6 +17,95 @@ from googleapiclient.errors import HttpError
 logger = logging.getLogger(__name__)
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
+# Верхняя граница строк при чтении FILTERS через gridData (обычно десятки ссылок)
+_SHEETS_URL_COLUMN_MAX_ROWS = 5000
+
+
+def _extract_url_from_hyperlink_formula(formula: str) -> Optional[str]:
+    """
+    Достаёт первый аргумент из =HYPERLINK("url", "подпись") или с «;» (локаль Sheets).
+    """
+    if not formula:
+        return None
+    s = formula.strip()
+    if len(s) < 12 or not s.upper().startswith("=HYPERLINK"):
+        return None
+    idx = s.upper().find("HYPERLINK")
+    idx = s.find("(", idx)
+    if idx < 0:
+        return None
+    i = idx + 1
+    n = len(s)
+    while i < n and s[i].isspace():
+        i += 1
+    if i >= n:
+        return None
+    quote = s[i]
+    if quote not in '"\'':
+        return None
+    i += 1
+    parts: List[str] = []
+    while i < n:
+        c = s[i]
+        if c == quote:
+            if quote == '"' and i + 1 < n and s[i + 1] == '"':
+                parts.append('"')
+                i += 2
+                continue
+            if quote == "'" and i + 1 < n and s[i + 1] == "'":
+                parts.append("'")
+                i += 2
+                continue
+            break
+        parts.append(c)
+        i += 1
+    out = "".join(parts).strip()
+    return out if out.startswith("http") else None
+
+
+def _url_from_text_format_runs(cell: Dict[str, Any]) -> Optional[str]:
+    for run in cell.get("textFormatRuns") or []:
+        fmt = run.get("format") or {}
+        link = fmt.get("link") or {}
+        uri = link.get("uri")
+        if uri and str(uri).strip().startswith("http"):
+            return str(uri).strip()
+    return None
+
+
+def _url_from_grid_cell(cell: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Реальный URL из ячейки: hyperlink, rich-text link, формула HYPERLINK, текст."""
+    if not cell:
+        return None
+    h = cell.get("hyperlink")
+    if h and str(h).strip().startswith("http"):
+        return str(h).strip()
+    u = _url_from_text_format_runs(cell)
+    if u:
+        return u
+    ue = cell.get("userEnteredValue") or {}
+    fv = ue.get("formulaValue")
+    if fv:
+        extracted = _extract_url_from_hyperlink_formula(fv)
+        if extracted:
+            return extracted
+    for key in ("stringValue", "numberValue", "boolValue"):
+        if key not in ue:
+            continue
+        raw = ue.get(key)
+        if raw is None:
+            continue
+        t = str(raw).strip()
+        if t.startswith("http"):
+            return t
+        break
+    disp = cell.get("formattedValue")
+    if disp:
+        t = str(disp).strip()
+        if t.startswith("http"):
+            return t
+    return None
+
 
 class SheetsManager:
     """
@@ -166,45 +255,54 @@ class SheetsManager:
     def get_urls(self, tab_name: str = "FILTERS", column: str = "A") -> List[str]:
         """
         Читает URLs из указанной табы и колонки.
-        Автоматически фильтрует заголовки и невалидные URL.
-        
+
+        Важно: values().get по умолчанию отдаёт *отображаемый* текст. Для =HYPERLINK(...,"короткая подпись")
+        или вставленной в текст ссылки это не полный URL. Поэтому используем spreadsheets.get +
+        includeGridData: поле hyperlink, textFormatRuns, formulaValue.
+
         Args:
             tab_name: Название табы (по умолчанию "FILTERS")
             column: Колонка с URLs (по умолчанию "A")
-            
+
         Returns:
-            Список валидных URL
+            Список валидных URL в порядке строк листа
         """
         try:
             self._throttle_read()
+            range_a1 = f"{tab_name}!{column}1:{column}{_SHEETS_URL_COLUMN_MAX_ROWS}"
 
-            def _get():
+            def _get_grid():
+                # Вся CellData по колонке: hyperlink, formula, rich-text links (textFormatRuns)
                 return (
-                    self.sheet.values()
-                    .get(
+                    self.sheet.get(
                         spreadsheetId=self.spreadsheet_id,
-                        range=f"{tab_name}!{column}:{column}",
-                    )
-                    .execute()
+                        ranges=[range_a1],
+                        includeGridData=True,
+                        fields="sheets(data(rowData(values)))",
+                    ).execute()
                 )
 
-            result = self._execute_with_retry(_get)
-            values = result.get("values", [])
-            
-            urls = []
-            for row in values:
-                if row and row[0]:
-                    url = row[0].strip()
-                    # Пропускаем заголовки и невалидные URLs
-                    if (
-                        url.lower() not in ("url", "urls", "")
-                        and url.startswith("http")
-                    ):
+            grid = self._execute_with_retry(_get_grid)
+            urls: List[str] = []
+            for sheet in grid.get("sheets") or []:
+                for data in sheet.get("data") or []:
+                    for row in data.get("rowData") or []:
+                        if not row:
+                            continue
+                        cells = row.get("values") or []
+                        if not cells:
+                            continue
+                        url = _url_from_grid_cell(cells[0])
+                        if not url:
+                            continue
+                        low = url.lower()
+                        if low in ("url", "urls"):
+                            continue
                         urls.append(url)
-            
-            logger.info(f"Read {len(urls)} URLs from {tab_name}!{column}")
+
+            logger.info(f"Read {len(urls)} URLs from {tab_name}!{column} (gridData/hyperlink)")
             return urls
-            
+
         except Exception as e:
             logger.error(f"Failed to read URLs from Google Sheets: {e}")
             raise

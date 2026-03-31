@@ -20,13 +20,83 @@ from services.parser_cian.models import ParsedAdData
 
 logger = logging.getLogger(__name__)
 
+
+def _sanitize_building_type(raw: Any) -> str:
+    """
+    Только реальный «Тип дома» (материал/конструкция). Не «Строительная серия»
+    (Индивидуальный проект, II-49, П-44Т и т.д.) — иначе пустая строка.
+    """
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    low = s.lower()
+    if "индивидуальн" in low and "проект" in low:
+        return ""
+    if low in ("нет информации", "нет данных", "-", "—"):
+        return ""
+    if re.match(r"^[IVX]+\s*[-–]\s*\d", s, re.I):
+        return ""
+    if re.match(r"^\s*П-?\d", s, re.I):
+        return ""
+    if re.match(r"^\s*\d+\s*[-–/]\s*\d+", s):
+        return ""
+    return s
+
+
+def _parse_price_history_date_str(d_str: Any):
+    """Дата для сортировки: datetime.date или None."""
+    if not isinstance(d_str, str):
+        return None
+    d_str = d_str.strip()
+    if not d_str:
+        return None
+    try:
+        return datetime.strptime(d_str, "%Y-%m-%d").date()
+    except Exception:
+        pass
+    try:
+        months = {
+            "янв": 1,
+            "фев": 2,
+            "мар": 3,
+            "апр": 4,
+            "май": 5,
+            "мая": 5,
+            "июн": 6,
+            "июл": 7,
+            "авг": 8,
+            "сен": 9,
+            "окт": 10,
+            "ноя": 11,
+            "дек": 12,
+        }
+        parts = d_str.split()
+        if len(parts) >= 3:
+            day = int(parts[0])
+            mon_raw = parts[1].lower()[:3]
+            year = int(parts[2])
+            mon = months.get(mon_raw)
+            if mon:
+                return datetime(year, mon, day).date()
+    except Exception:
+        pass
+    return None
+
+
 # System prompt для AI-экстракции
 SYSTEM_PROMPT = (
     "Экстрактор объявлений Cian.ru: заполни поля по схеме из markdown; нет данных — null. "
-    "Просмотры: в одной строке «X просмотров, Y за сегодня» — X→total_views, Y→unique_views. "
+    "ВАЖНО: housing_type — это 'Тип жилья' из раздела 'О квартире' (Вторичка или Новостройка). "
+    "building_type — ТОЛЬКО строка 'Тип дома' в блоке 'О доме' (Панельный, Кирпичный, Монолитный…). "
+    "Если строки 'Тип дома' на странице нет — building_type = null. "
+    "НИКОГДА не подставляй сюда 'Строительную серию' (Индивидуальный проект, II-49, П-44Т и т.п.). "
+    "renovation — тип ремонта из 'О квартире'. district — район, okrug — ЦАО, ЮВАО и т.д. "
+    "Просмотры: «X просмотров, Y за сегодня» — X→total_views, Y→unique_views. "
     "is_active: true, если карточка доступна. "
-    "price_history: если есть раздел 'История цены' — заполни массив записей с date, price, "
-    "change_amount (0 для первой), change_type (initial/decrease/increase). Нет раздела — null."
+    "price_history: строки таблицы 'История цены' в хронологическом порядке (сначала старые события), "
+    "для каждой строки: date в формате YYYY-MM-DD и price; сумму изменения и тип пересчитает бэкенд."
 )
 
 # Теги для исключения из HTML перед конвертацией в markdown
@@ -37,7 +107,7 @@ EXCLUDE_TAGS = [
     "style",
     "footer",
     "header",
-    "[data-name='CardSectionNew']",
+    # "[data-name='CardSectionNew']",
     "[data-name='OfferCardPageLayoutFooter']",
     "[id='adfox-stretch-banner']",
 ]
@@ -413,15 +483,18 @@ class AdParser:
                 "address": {
                     "type": "object",
                     "properties": {
-                        "full": {"type": "string", "description": "Полный адрес"},
-                        "district": {"type": "string", "description": "Район"},
+                        "full": {"type": "string", "description": "Полный адрес объекта как указан на странице"},
+                        "district": {
+                            "type": "string",
+                            "description": "Район Москвы (например: Лефортово, Хамовники, Южнопортовый, Останкинский, Котловка). Берётся из хлебных крошек или адресной строки после 'р-н'.",
+                        },
                         "metro_station": {
                             "type": "string",
-                            "description": "Ближайшая станция метро",
+                            "description": "Ближайшая станция метро (только название, без слова 'метро')",
                         },
                         "okrug": {
                             "type": "string",
-                            "description": "Округ (ЦАО, ЮВАО и т.д.)",
+                            "description": "Административный округ Москвы — аббревиатура: ЦАО, ЮВАО, СВАО, ЗАО, ЮЗАО, САО, ВАО, СЗАО, ЮАО и т.д.",
                         },
                     },
                 },
@@ -429,7 +502,12 @@ class AdParser:
                 "rooms": {"type": "integer", "description": "Количество комнат"},
                 "housing_type": {
                     "type": "string",
-                    "description": "Тип жилья (Вторичка, Новостройка)",
+                    "description": "Тип жилья из раздела 'О квартире' — только 'Вторичка' или 'Новостройка'. НЕ путать с типом дома.",
+                },
+                "building_type": {
+                    "type": ["string", "null"],
+                    "description": "Только поле 'Тип дома' в блоке 'О доме' (Панельный, Кирпичный, Монолитный…). "
+                    "Если строки 'Тип дома' нет — null. НЕ брать 'Строительную серию' (Индивидуальный проект, II-49, П-44Т).",
                 },
                 "floor_info": {
                     "type": "object",
@@ -445,7 +523,10 @@ class AdParser:
                     "type": "integer",
                     "description": "Год постройки дома",
                 },
-                "renovation": {"type": "string", "description": "Тип ремонта"},
+                "renovation": {
+                    "type": "string",
+                    "description": "Тип ремонта из раздела 'О квартире' — например: Евроремонт, Косметический, Дизайнерский, Без ремонта. НЕ путать с типом дома.",
+                },
                 "metro_walk_time": {
                     "type": "integer",
                     "description": "Минут пешком до БЛИЖАЙШЕЙ станции метро",
@@ -478,15 +559,15 @@ class AdParser:
                             },
                             "change_amount": {
                                 "type": "integer",
-                                "description": "На сколько изменилась цена (отрицательное = снижение). 0 для первой записи.",
+                                "description": "Опционально; пересчитывается на сервере по порядку строк.",
                             },
                             "change_type": {
                                 "type": "string",
                                 "enum": ["initial", "decrease", "increase"],
-                                "description": "Тип изменения: initial (первая цена), decrease (снижение), increase (повышение)",
+                                "description": "Опционально; пересчитывается на сервере.",
                             },
                         },
-                        "required": ["date", "price", "change_amount", "change_type"],
+                        "required": ["date", "price"],
                     },
                 },
             },
@@ -548,17 +629,62 @@ class AdParser:
         }
 
         try:
-            # trust_env=False: иначе HTTP(S)_PROXY шлёт запрос на внутренний хост Firecrawl
-            # через мобильный прокси → getaddrinfo flippercrawl-api-1 не резолвится.
-            async with httpx.AsyncClient(timeout=180.0, trust_env=False) as client:
-                response = await client.post(
-                    self.firecrawl_api_url, json=payload, headers=headers
-                )
+            # Firecrawl иногда отвечает 500 SCRAPE_ALL_ENGINES_FAILED (часто из‑за таймаута/прокси).
+            # В этом случае ждём 5 секунд и пробуем до 3 раз, затем сдаёмся.
+            response = None
+            for attempt in range(3):
+                try:
+                    # trust_env=False: иначе HTTP(S)_PROXY шлёт запрос на внутренний хост Firecrawl
+                    # через мобильный прокси → getaddrinfo flippercrawl-api-1 не резолвится.
+                    async with httpx.AsyncClient(timeout=180.0, trust_env=False) as client:
+                        response = await client.post(
+                            self.firecrawl_api_url, json=payload, headers=headers
+                        )
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout, OSError) as e:
+                    if attempt < 2:
+                        logger.warning(
+                            "Firecrawl network error (attempt %s/3) for %s: %s. Retrying in 5s...",
+                            attempt + 1,
+                            url,
+                            e,
+                        )
+                        await asyncio.sleep(5)
+                        continue
+                    raise
 
-            if response.status_code != 200:
+                if response.status_code == 200:
+                    break
+
+                # retryable 500 with known code
+                retryable = False
+                if response.status_code >= 500:
+                    try:
+                        j = response.json()
+                        if (
+                            isinstance(j, dict)
+                            and j.get("code") == "SCRAPE_ALL_ENGINES_FAILED"
+                        ):
+                            retryable = True
+                    except Exception:
+                        retryable = False
+
+                if retryable and attempt < 2:
+                    logger.warning(
+                        "Firecrawl 5xx %s (SCRAPE_ALL_ENGINES_FAILED) attempt %s/3 for %s. Retrying in 5s...",
+                        response.status_code,
+                        attempt + 1,
+                        url,
+                    )
+                    await asyncio.sleep(5)
+                    continue
+
+                # non-retryable or last attempt
                 raise ValueError(
                     f"Firecrawl API error: {response.status_code} - {response.text[:200]}"
                 )
+
+            if response is None or response.status_code != 200:
+                raise ValueError("Firecrawl API error: no successful response after retries")
 
             result = response.json()
 
@@ -679,95 +805,94 @@ class AdParser:
         if floor_data:
             result["floor_info"] = floor_data
 
-        # Нормализуем историю цен
+        # История цен: хронология по (дата, порядок в ответе ИИ), дельта от предыдущей строки
         ph = data.get("price_history")
         if ph and isinstance(ph, list):
-            parsed_ph = []
+            rows = []
             for idx, entry in enumerate(ph):
+                if not isinstance(entry, dict):
+                    continue
                 d_str = entry.get("date")
                 p = entry.get("price")
-                parsed_date = None
-                if isinstance(d_str, str):
-                    try:
-                        parsed_date = datetime.strptime(d_str, "%Y-%m-%d")
-                    except Exception:
-                        try:
-                            months = {
-                                "янв": 1,
-                                "фев": 2,
-                                "мар": 3,
-                                "апр": 4,
-                                "май": 5,
-                                "мая": 5,
-                                "июн": 6,
-                                "июл": 7,
-                                "авг": 8,
-                                "сен": 9,
-                                "окт": 10,
-                                "ноя": 11,
-                                "дек": 12,
-                            }
-                            parts = d_str.strip().split()
-                            if len(parts) >= 3:
-                                day = int(parts[0])
-                                mon_raw = parts[1].lower()[:3]
-                                year = int(parts[2])
-                                mon = months.get(mon_raw)
-                                if mon:
-                                    parsed_date = datetime(year, mon, day)
-                        except Exception:
-                            parsed_date = None
-
-                parsed_ph.append(
+                price_i = int(p) if isinstance(p, (int, float)) else None
+                if price_i is None:
+                    continue
+                d_key = _parse_price_history_date_str(d_str)
+                rows.append(
                     {
                         "orig_index": idx,
-                        "date_str": d_str,
-                        "date": parsed_date.date() if parsed_date else None,
-                        "price": int(p) if isinstance(p, (int, float)) else None,
+                        "date_str": d_str if isinstance(d_str, str) else None,
+                        "date": d_key,
+                        "price": price_i,
                     }
                 )
 
-            parsed_ph = [e for e in parsed_ph if e.get("price") is not None]
+            if rows:
+                # Циан показывает историю цены "сверху новые".
+                # Firecrawl/LLM часто возвращают строки ровно в этом порядке.
+                # Нам нужна строгая хронология "сначала старые", поэтому:
+                # - сортируем по дате ASC
+                # - внутри одной даты сохраняем порядок, соответствующий "старые→новые"
+                #   (если исходный список был "новые→старые", то внутри даты разворачиваем).
+                dated_in_input = [r for r in rows if r.get("date") is not None]
+                input_is_desc = False
+                if len(dated_in_input) >= 2:
+                    first_date = dated_in_input[0]["date"]
+                    last_date = dated_in_input[-1]["date"]
+                    input_is_desc = bool(first_date and last_date and first_date > last_date)
 
-            if parsed_ph:
-                dated = [e for e in parsed_ph if e.get("date") is not None]
-                order_desc = True
-                if dated and len(dated) >= 2:
-                    if dated[0]["date"] < dated[1]["date"]:
-                        order_desc = False
+                def _sort_key(e):
+                    # None-date всегда в конце, порядок в пределах None сохраняем как есть
+                    date_rank = 1 if e["date"] is None else 0
+                    date_key = e["date"] or datetime.min.date()
+                    # внутри одной даты: если вход был desc, то старые элементы ближе к концу input
+                    intra = -e["orig_index"] if input_is_desc else e["orig_index"]
+                    return (date_rank, date_key, intra)
 
-                seq = parsed_ph if order_desc else list(reversed(parsed_ph))
+                rows.sort(key=_sort_key)
 
                 out = []
-                for i, item in enumerate(seq):
-                    cur_price = item["price"]
-                    if i + 1 < len(seq):
-                        prev_price = seq[i + 1]["price"]
-                        change_amount = cur_price - prev_price
-                        if change_amount < 0:
-                            change_type = "decrease"
-                        elif change_amount > 0:
-                            change_type = "increase"
-                        else:
-                            change_type = "initial"
+                for i, item in enumerate(rows):
+                    cur = item["price"]
+                    # Всегда нормализуем в ISO-дату, если можем распарсить.
+                    # Это устраняет вариативность вида "2 ноя 2024" vs "2024-11-02".
+                    date_out = item["date"].strftime("%Y-%m-%d") if item.get("date") else None
+                    if date_out is None:
+                        date_out = (
+                            item["date_str"].strip()
+                            if isinstance(item["date_str"], str)
+                            and item["date_str"].strip()
+                            else None
+                        )
+                    if i == 0:
+                        out.append(
+                            {
+                                "date": date_out,
+                                "price": cur,
+                                "change_amount": 0,
+                                "change_type": "initial",
+                            }
+                        )
+                        continue
+                    prev = rows[i - 1]["price"]
+                    delta = cur - prev
+                    if delta < 0:
+                        ct = "decrease"
+                    elif delta > 0:
+                        ct = "increase"
                     else:
-                        change_type = "initial"
-                        change_amount = 0
-
+                        ct = "initial"
                     out.append(
                         {
-                            "date": item.get("date_str")
-                            or (
-                                item["date"].strftime("%Y-%m-%d")
-                                if item.get("date")
-                                else None
-                            ),
-                            "price": cur_price,
-                            "change_amount": change_amount,
-                            "change_type": change_type,
+                            "date": date_out,
+                            "price": cur,
+                            "change_amount": delta,
+                            "change_type": ct,
                         }
                     )
 
                 result["price_history"] = out
+
+        result["building_type"] = _sanitize_building_type(result.get("building_type"))
 
         return result

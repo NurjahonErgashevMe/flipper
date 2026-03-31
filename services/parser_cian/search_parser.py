@@ -18,6 +18,7 @@ def extract_ad_urls_from_search(
     max_pages: int = 50,
     http_proxy: str = None,
     list_html_loader=None,
+    duplicate_streak_to_stop: int = 2,
 ) -> List[str]:
     """
     Извлекает ссылки на объявления из поисковой страницы Cian.
@@ -28,6 +29,7 @@ def extract_ad_urls_from_search(
         max_pages: Максимальное количество страниц пагинации для парсинга (по умолчанию 50)
         http_proxy: URL прокси для прямых запросов (если Decodo из env не подключился)
         list_html_loader: явный загрузчик HTML; иначе CianParser сам пробует Decodo из env (приоритет над прокси)
+        duplicate_streak_to_stop: стоп после стольких подряд страниц без новых URL (ложный дубль первых страниц)
 
     Returns:
         Список URLs объявлений
@@ -59,7 +61,9 @@ def extract_ad_urls_from_search(
         )
         
         all_urls = set()
-        
+        dup_streak = 0
+        streak_n = max(1, int(duplicate_streak_to_stop or 1))
+
         for page in range(1, max_pages + 1):
             logger.info(f"Parsing search page {page} / {max_pages}")
             
@@ -99,13 +103,21 @@ def extract_ad_urls_from_search(
             if not page_urls:
                 logger.info("No URLs found on this page. Stopping pagination.")
                 break
-                
-            # Проверяем, вернул ли Cian те же самые ссылки (например, редирект на первую страницу)
+
+            # Те же карточки, что уже видели (часто p=2 = копия p=1 из-за капчи/битого HTML).
+            # Одна такая страница не должна обрывать весь обход — ждём streak подряд.
             new_urls = set(page_urls) - all_urls
             if not new_urls:
-                logger.info("All URLs on this page are duplicates. Pagination exhausted.")
-                break
-                
+                dup_streak += 1
+                logger.warning(
+                    f"Page {page}: нет новых ссылок (дубликат выдачи), подряд {dup_streak}/{streak_n}"
+                )
+                if dup_streak >= streak_n:
+                    logger.info("Stopping pagination: лимит подряд дублирующихся страниц.")
+                    break
+                continue
+
+            dup_streak = 0
             all_urls.update(page_urls)
             logger.info(f"Added {len(new_urls)} new URLs. Total unique so far: {len(all_urls)}")
             
@@ -126,6 +138,7 @@ def extract_batch_from_searches(
     http_proxy: str = None,
     change_ip_callback=None,
     list_html_loader=None,
+    duplicate_streak_to_stop: int = 2,
 ) -> List[str]:
     """
     Извлекает ссылки из нескольких поисковых страниц.
@@ -137,6 +150,7 @@ def extract_batch_from_searches(
         http_proxy: URL прокси
         change_ip_callback: Функция для смены IP перед каждой страницей
         list_html_loader: callable(url) -> str — внешняя загрузка HTML списков
+        duplicate_streak_to_stop: подряд страниц без новых URL перед остановкой
 
     Returns:
         Объединенный список всех извлеченных ссылок объявлений
@@ -160,6 +174,7 @@ def extract_batch_from_searches(
                 max_pages=max_pages,
                 http_proxy=http_proxy,
                 list_html_loader=list_html_loader,
+                duplicate_streak_to_stop=duplicate_streak_to_stop,
             )
             all_ad_urls.extend(urls)
             logger.info(f"Added {len(urls)} URLs from search page {i}")

@@ -6,7 +6,7 @@ services.parser_cian.models - Pydantic models for Cian real estate ads
 """
 
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional, List, Any, Literal, Union
+from typing import Optional, List, Any, Literal
 from datetime import datetime, timezone, timedelta
 
 MSK = timezone(timedelta(hours=3))
@@ -122,7 +122,11 @@ class ParsedAdData(BaseModel):
     )
     housing_type: Optional[str] = Field(
         None,
-        description="Тип жилья (квартира, дом, студия и т.д).",
+        description="Тип жилья из раздела 'О квартире': Вторичка или Новостройка.",
+    )
+    building_type: Optional[str] = Field(
+        None,
+        description="Тип дома из раздела 'О доме': Панельный, Кирпичный, Монолитный, Блочный и т.д.",
     )
 
     # Информация об этажах
@@ -138,7 +142,7 @@ class ParsedAdData(BaseModel):
     )
     renovation: Optional[str] = Field(
         None,
-        description="Статус ремонта.",
+        description="Тип ремонта из раздела 'О квартире': Евроремонт, Косметический, Дизайнерский, Без ремонта и т.д.",
     )
     metro_walk_time: Optional[int] = Field(
         None,
@@ -236,7 +240,11 @@ def parse_to_sheets_row(data: ParsedAdData) -> List[Any]:
     # Используем формат "YYYY-MM-DD HH:MM:SS" который Google Sheets распознает как дату.
     parsed_at_str = datetime.now(MSK).strftime("%Y-%m-%d %H:%M:%S")
 
-    # Собираем строку согласно схеме Google Sheets
+    # Собираем строку под листы Offers_Parser / Avans (одинаковый порядок колонок).
+    # Порядок должен 1:1 соответствовать шапке таблицы:
+    # url, publish_date, price, title, address, description, price_per_m2, area, construction_year,
+    # days_in_exposition, district, floor_info, housing_type, metro_station, metro_walk_time,
+    # okrug, renovation, rooms, total_views, unique_views, cian_id, parsed_at
     return [
         data.url or "",                                    # A: URL
         data.publish_date or "",                           # B: Дата публикации
@@ -245,12 +253,12 @@ def parse_to_sheets_row(data: ParsedAdData) -> List[Any]:
         addr_full,                                         # E: Полный адрес
         data.description or "",                            # F: Описание
         data.price_per_m2 if data.price_per_m2 else "",   # G: Цена за м²
-        data.area if data.area else "",                    # H: Площадь
+        data.area if data.area is not None else "",        # H: Площадь
         data.construction_year or "",                      # I: Год постройки
         data.days_in_exposition or "",                     # J: Дней в каталоге
         district,                                          # K: Район
         floor_str,                                         # L: Этажи
-        data.housing_type or "",                           # M: Тип жилья
+        data.housing_type or "",                           # M: Тип жилья (Вторичка/Новостройка)
         metro_station,                                     # N: Метро
         data.metro_walk_time or "",                        # O: Время до метро
         okrug,                                             # P: Округ
@@ -259,5 +267,5 @@ def parse_to_sheets_row(data: ParsedAdData) -> List[Any]:
         data.total_views or "",                            # S: Всего просмотров
         data.unique_views or "",                           # T: Уникальных просмотров
         data.cian_id or "",                                # U: ID Cian
-        parsed_at_str,                                     # V: Время парсинга (строка в формате YYYY-MM-DD HH:MM:SS)
+        parsed_at_str,                                     # V: Время парсинга
     ]
