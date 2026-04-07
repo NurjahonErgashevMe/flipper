@@ -85,6 +85,95 @@ def _parse_price_history_date_str(d_str: Any):
     return None
 
 
+def _is_cian_markdown_ui_line(line: str) -> bool:
+    """Строки из markdown-карточки Циана, не являющиеся текстом описания."""
+    t = line.strip()
+    if not t:
+        return False
+    low = t.lower()
+    if low in ("на карте", "сравнить", "пожаловаться"):
+        return True
+    if low.startswith("скачать в"):
+        return True
+    if low in ("3d-тур", "3d тур"):
+        return True
+    if re.fullmatch(r"\d+\s*фото", t, flags=re.I):
+        return True
+    if re.fullmatch(r"\*+\s*\d+\s*фото", t, flags=re.I):
+        return True
+    if re.fullmatch(r"планировка", low):
+        return True
+    # Маркер метро: «*   Новослободская — 10 мин.»
+    if re.match(r"^\*+\s+.+\d+\s*мин", t):
+        return True
+    # Короткая строка «Станция — N мин» / «Станция N мин» (без длинного текста)
+    if len(t) <= 72:
+        if re.match(r"^[А-ЯЁ0-9«»\w\s\.,\-]+—\s*\d{1,4}\s*мин", t):
+            return True
+        if re.match(
+            r"^[А-ЯЁ][а-яё\-A-Za-z0-9\s\.\-«»]{1,40}\s+\d{1,2}\s*мин\.?\s*$", t
+        ):
+            return True
+    if re.fullmatch(r"\[[^\]]+\]\([^)]+\)", t):
+        return True
+    # Дубли параметров из верхней части markdown (без пробела после метки — как на Циан)
+    if re.match(r"^Общая\s+площадь\s*[\d.,]", t, re.I):
+        return True
+    if re.match(r"^Жилая\s+площадь\s*[\d.,]", t, re.I):
+        return True
+    if re.match(r"^Площадь\s+кухни\s*[\d.,]", t, re.I):
+        return True
+    if re.match(r"^Этаж\s*\d", t, re.I):
+        return True
+    if re.match(r"^Год\s+постройки\s*\d", t, re.I):
+        return True
+    return False
+
+
+def _clean_cian_description(raw: str) -> str:
+    """
+    Убирает из description «сырой» markdown карточки (хлебные крошки, списки метро, кнопки).
+    Оставляет основной текст: обычно всё после блока «… Год постройки YYYY».
+    """
+    if not raw or not str(raw).strip():
+        return ""
+    s = str(raw).replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    # 1) После последнего «Год постройки YYYY» — там начинается связное описание
+    year_m = list(re.finditer(r"Год\s+постройки\s*\d{4}", s, flags=re.IGNORECASE))
+    if year_m:
+        tail = s[year_m[-1].end() :].lstrip()
+        if len(tail) >= 20:
+            s = tail
+    else:
+        # 2) Якоря начала продающего текста (если года в тексте нет)
+        for pat in (
+            r"Код\s+объекта\s*:\s*\d+",
+            r"За\s+объект\s+уже\s+внесли",
+            r"За\s+квартиру\s+внесен",
+            r"Внесен\s+аванс",
+        ):
+            m = re.search(pat, s, flags=re.IGNORECASE)
+            if m and len(s[m.start() :].strip()) >= 30:
+                s = s[m.start() :].strip()
+                break
+
+    lines_out: list[str] = []
+    for line in s.split("\n"):
+        t = line.strip()
+        if not t:
+            if lines_out and lines_out[-1] != "":
+                lines_out.append("")
+            continue
+        if _is_cian_markdown_ui_line(t):
+            continue
+        lines_out.append(line.rstrip())
+
+    out = "\n".join(lines_out).strip()
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out
+
+
 # System prompt для AI-экстракции
 SYSTEM_PROMPT = (
     "Экстрактор объявлений Cian.ru: заполни поля по схеме из markdown; нет данных — null. "
@@ -93,6 +182,9 @@ SYSTEM_PROMPT = (
     "Если строки 'Тип дома' на странице нет — building_type = null. "
     "НИКОГДА не подставляй сюда 'Строительную серию' (Индивидуальный проект, II-49, П-44Т и т.п.). "
     "renovation — тип ремонта из 'О квартире'. district — район, okrug — ЦАО, ЮВАО и т.д. "
+    "description — только связный текст описания из блока под карточкой: без хлебных крошек, "
+    "без списков метро (* … мин), без «На карте», «Скачать», «Пожаловаться», без дубля строк "
+    "«Общая площадь / Этаж / Год постройки» (эти поля уже в других полях схемы). "
     "Просмотры: «X просмотров, Y за сегодня» — X→total_views, Y→unique_views. "
     "is_active: true, если карточка доступна. "
     "price_history: строки таблицы 'История цены' в хронологическом порядке (сначала старые события), "
@@ -215,34 +307,45 @@ class AdParser:
 
         for attempt in range(attempts):
             try:
+                # follow_redirects=True: иначе часто приходит 302 с пустым body и проверка ломается
                 async with httpx.AsyncClient(
-                    timeout=10.0, follow_redirects=False, trust_env=False
+                    timeout=10.0, follow_redirects=True, trust_env=False
                 ) as client:
                     resp = await client.get(
                         "https://my.cian.ru/profile", headers=headers
                     )
 
-                    if resp.status_code in [301, 302, 303, 307, 308]:
-                        location = resp.headers.get("location", "")
-                        if "authenticate" in location:
-                            logger.warning(
-                                f"Attempt {attempt + 1}: Redirected to login"
-                            )
-                            if attempt < attempts - 1:
-                                await asyncio.sleep(5)
-                            continue
+                final_url = str(resp.url or "")
+                if "authenticate" in final_url or "/login" in final_url.lower():
+                    logger.warning(
+                        f"Attempt {attempt + 1}: попали на страницу логина ({final_url[:80]})"
+                    )
+                    if attempt < attempts - 1:
+                        await asyncio.sleep(5)
+                    continue
 
-                        html = resp.text
+                if resp.status_code != 200:
+                    logger.warning(
+                        f"Attempt {attempt + 1}: profile HTTP {resp.status_code}"
+                    )
+                    if attempt < attempts - 1:
+                        await asyncio.sleep(5)
+                    continue
 
-                        if '"isAuthenticated":true' in html:
-                            logger.info(
-                                f"✅ isAuthenticated: true (attempt {attempt + 1})"
-                            )
-                            return True
-                        elif '"isAuthenticated":false':
-                            logger.warning(
-                                f"❌ isAuthenticated: false (attempt {attempt + 1})"
-                            )
+                html = resp.text or ""
+                if '"isAuthenticated":true' in html:
+                    logger.info(
+                        f"✅ isAuthenticated: true (attempt {attempt + 1})"
+                    )
+                    return True
+                if '"isAuthenticated":false' in html:
+                    logger.warning(
+                        f"❌ isAuthenticated: false (attempt {attempt + 1})"
+                    )
+                else:
+                    logger.warning(
+                        f"Attempt {attempt + 1}: в HTML нет isAuthenticated (len={len(html)})"
+                    )
             except Exception as e:
                 logger.warning(f"⚠️ Attempt {attempt + 1} error: {e}")
 
@@ -478,7 +581,8 @@ class AdParser:
                 "title": {"type": "string", "description": "Заголовок объявления"},
                 "description": {
                     "type": "string",
-                    "description": "Текст описания объявления",
+                    "description": "Только текст описания продавца: без markdown-навигации, хлебных крошек, "
+                    "списков метро, кнопок «Скачать». Без дубля строк параметров (площадь/этаж/год).",
                 },
                 "address": {
                     "type": "object",
@@ -713,7 +817,10 @@ class AdParser:
                     logger.error("❌ Authentication failed! Triggering recovery...")
                     await self._check_and_trigger_recovery()
                     raise ValueError("Authentication failed. Recovery triggered.")
-                raise ValueError("No JSON data extracted")
+                raise ValueError(
+                    "No JSON data extracted: Firecrawl не вернул json (сбой/таймаут LLM или пустая схема); "
+                    "профиль my.cian.ru при этом доступен — это не обязательно проблема куков."
+                )
 
             extracted_data = data_obj["json"]
             extracted_data["url"] = url
@@ -894,5 +1001,9 @@ class AdParser:
                 result["price_history"] = out
 
         result["building_type"] = _sanitize_building_type(result.get("building_type"))
+
+        desc = result.get("description")
+        if isinstance(desc, str) and desc.strip():
+            result["description"] = _clean_cian_description(desc)
 
         return result

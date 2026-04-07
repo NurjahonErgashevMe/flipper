@@ -1,9 +1,12 @@
 """Main entry point for category counter service."""
 
+import os
 import sys
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
 
 from packages.flipper_core.sheets import SheetsManager
 from services.category_counter.parser import CategoryCounterParser
@@ -20,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 def main():
     """Run category counter parser."""
-    logger.info("Starting category counter parser (direct HTTP; proxy только в cookie_manager)...")
+    load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
+    logger.info(
+        "Starting category counter parser (Decodo при наличии DECODO_AUTH_TOKEN; иначе direct HTTP)..."
+    )
     parser = CategoryCounterParser(http_proxy=None)
     
     # Parse all categories

@@ -85,17 +85,14 @@ async def worker(
 
 async def test_ads():
     urls_to_test = [
-       "https://www.cian.ru/sale/flat/309406800/",
-       "https://www.cian.ru/sale/flat/323360848/",
-       "https://www.cian.ru/sale/flat/327265028/",
-       "https://www.cian.ru/sale/flat/328077786/",
-       "https://www.cian.ru/sale/flat/327645683/",
-       "https://www.cian.ru/sale/flat/325766408/",
-       "https://www.cian.ru/sale/flat/319747895/",
-       "https://www.cian.ru/sale/flat/327763784/",
-       "https://www.cian.ru/sale/flat/328331552/",
-       "https://www.cian.ru/sale/flat/326618362/",
-       "https://www.cian.ru/sale/flat/321551381/",
+        "https://www.cian.ru/sale/flat/325586286/",
+        "https://www.cian.ru/sale/flat/325586286/",
+        "https://www.cian.ru/sale/flat/326556052/",
+        "https://www.cian.ru/sale/flat/327286191/",
+        "https://www.cian.ru/sale/flat/327883327/",
+        "https://www.cian.ru/sale/flat/324563821/",
+        "https://www.cian.ru/sale/flat/322163051/",
+        "https://www.cian.ru/sale/flat/317574947/",
     ]
 
     parser = AdParser(
@@ -104,7 +101,9 @@ async def test_ads():
         firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY", "test-key"),
     )
 
-    logger.info(f"URL-ов: {len(urls_to_test)}, воркеров: {min(CONCURRENCY, len(urls_to_test))}")
+    logger.info(
+        f"URL-ов: {len(urls_to_test)}, воркеров: {min(CONCURRENCY, len(urls_to_test))}"
+    )
 
     queue: asyncio.Queue[str] = asyncio.Queue()
     for u in urls_to_test:
@@ -114,8 +113,7 @@ async def test_ads():
     num_workers = min(CONCURRENCY, len(urls_to_test))
 
     workers = [
-        asyncio.create_task(worker(queue, parser, i, stats))
-        for i in range(num_workers)
+        asyncio.create_task(worker(queue, parser, i, stats)) for i in range(num_workers)
     ]
     await queue.join()
     for w in workers:
