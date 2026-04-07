@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     sheet_highlight_color: dict = {"red": 1.0, "green": 0.9, "blue": 0.7}
     """Цвет выделения строк в Google Sheets (RGB)"""
 
+    sheet_deactivated_color: dict = {"red": 0.71, "green": 0.84, "blue": 0.66}
+    """Цвет для объявлений, подходящих под критерии, но снятых с публикации (#B5D6A8)"""
+
     model_config = SettingsConfigDict(
         env_file=os.path.join(
             os.path.dirname(__file__),

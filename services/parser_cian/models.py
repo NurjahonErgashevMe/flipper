@@ -205,20 +205,18 @@ class ParsedAdData(BaseModel):
 # ========================
 
 
-def parse_to_sheets_row(data: ParsedAdData) -> List[Any]:
+def parse_to_sheets_row(data: ParsedAdData, reason: str = "") -> List[Any]:
     """
     Адаптер: преобразует ParsedAdData в список значений для Google Sheets.
-    
-    Порядок полей соответствует колонкам в табличке "RESULTS".
-    
+
     Args:
         data: Распарсенные данные объявления
-        
+        reason: Причина попадания в Signals (колонка reason в Offers_Parser)
+
     Returns:
         Список значений для одной строки таблицы
     """
-    
-    # Распаковка вложенных объектов
+
     addr_full = data.address.full if data.address and data.address.full else ""
     district = data.address.district if data.address and data.address.district else ""
     metro_station = (
@@ -228,23 +226,16 @@ def parse_to_sheets_row(data: ParsedAdData) -> List[Any]:
     )
     okrug = data.address.okrug if data.address and data.address.okrug else ""
 
-    # Этажи в формате "3/5"
     floor_str = ""
     if data.floor_info:
         curr = data.floor_info.current or ""
         total = data.floor_info.all or ""
         floor_str = f"{curr}/{total}" if curr and total else (str(curr) if curr else "")
 
-    # Форматируем дату для Google Sheets
-    # Google Sheets API принимает строку в формате ISO или дату как строку.
-    # Используем формат "YYYY-MM-DD HH:MM:SS" который Google Sheets распознает как дату.
     parsed_at_str = datetime.now(MSK).strftime("%Y-%m-%d %H:%M:%S")
 
-    # Собираем строку под листы Offers_Parser / Avans (одинаковый порядок колонок).
-    # Порядок должен 1:1 соответствовать шапке таблицы:
-    # url, publish_date, price, title, address, description, price_per_m2, area, construction_year,
-    # days_in_exposition, district, floor_info, housing_type, metro_station, metro_walk_time,
-    # okrug, renovation, rooms, total_views, unique_views, cian_id, parsed_at
+    # Порядок 1:1 соответствует шапке таблицы Offers_Parser / Avans:
+    # A..V — данные объявления, W — reason
     return [
         data.url or "",                                    # A: URL
         data.publish_date or "",                           # B: Дата публикации
@@ -268,4 +259,5 @@ def parse_to_sheets_row(data: ParsedAdData) -> List[Any]:
         data.unique_views or "",                           # T: Уникальных просмотров
         data.cian_id or "",                                # U: ID Cian
         parsed_at_str,                                     # V: Время парсинга
+        reason,                                            # W: Reason (signals)
     ]

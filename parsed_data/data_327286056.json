@@ -1,0 +1,75 @@
+{
+  "url": "https://www.cian.ru/sale/flat/327286056/",
+  "cian_id": "327286056",
+  "price": 17100000,
+  "price_per_m2": 251471,
+  "title": "Продается 3-комн. квартира, 68 м²",
+  "description": "Объявление снято с публикации, поищите ещё что-нибудь",
+  "address": {
+    "full": "Москва, Северодвинская ул., 19",
+    "district": "Северное Медведково",
+    "metro_station": "Медведково",
+    "okrug": "СВАО"
+  },
+  "area": 68.0,
+  "rooms": 3,
+  "housing_type": "Вторичка",
+  "building_type": "Панельный",
+  "floor_info": {
+    "current": 11,
+    "all": 16
+  },
+  "construction_year": 1984,
+  "renovation": "Косметический",
+  "metro_walk_time": 18,
+  "publish_date": "2026-02-27",
+  "days_in_exposition": 40,
+  "total_views": 1327,
+  "unique_views": 1,
+  "is_active": false,
+  "price_history": [
+    {
+      "date": "2026-02-27",
+      "price": 18900000,
+      "change_amount": 0,
+      "change_type": "initial"
+    },
+    {
+      "date": "2026-03-04",
+      "price": 18500000,
+      "change_amount": -400000,
+      "change_type": "decrease"
+    },
+    {
+      "date": "2026-03-10",
+      "price": 17950000,
+      "change_amount": -550000,
+      "change_type": "decrease"
+    },
+    {
+      "date": "2026-03-12",
+      "price": 17700000,
+      "change_amount": -250000,
+      "change_type": "decrease"
+    },
+    {
+      "date": "2026-03-12",
+      "price": 17500000,
+      "change_amount": -200000,
+      "change_type": "decrease"
+    },
+    {
+      "date": "2026-03-18",
+      "price": 17200000,
+      "change_amount": -300000,
+      "change_type": "decrease"
+    },
+    {
+      "date": "2026-03-19",
+      "price": 17100000,
+      "change_amount": -100000,
+      "change_type": "decrease"
+    }
+  ],
+  "parsed_at": "2026-04-07T20:24:59.233085"
+}
