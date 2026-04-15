@@ -1,3 +1,5 @@
+# Обнуляем proxy-переменные из .env для сервисов, которым прокси не нужен.
+# cookie_manager получает .env как есть (env_file) — ему прокси могут быть нужны.
 x-strip-proxy-env: &strip-proxy-env
   HTTP_PROXY: ""
   HTTPS_PROXY: ""
@@ -5,10 +7,6 @@ x-strip-proxy-env: &strip-proxy-env
   https_proxy: ""
   ALL_PROXY: ""
   all_proxy: ""
-  PROXY_SERVER: ""
-  PROXY_USERNAME: ""
-  PROXY_PASSWORD: ""
-  CHANGE_IP_URL: ""
 
 services:
   html_to_markdown:

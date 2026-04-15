@@ -50,16 +50,10 @@ SPREADSHEET_ID=your_spreadsheet_id_here
 CREDENTIALS_PATH=/app/credentials.json
 ```
 
-### Опциональные переменные
+### Прокси (опционально)
 
-```env
-# Мобильный прокси с ротацией IP (опционально)
-# Format: http://username:password@proxy:port
-HTTP_PROXY=http://your_proxy_username:your_proxy_password@proxy.example.com:8080
-
-# Endpoint для смены IP (если поддерживается прокси)
-CHANGE_IP_URL=http://proxy.example.com:8080/changeip
-```
+Резидентские прокси из файла `data/proxies.txt` (формат: `host:port:user:pass` по строке).
+Если файл пустой или отсутствует — запросы без прокси.
 
 ## Структура записи в Google Sheets
 
@@ -89,9 +83,8 @@ CHANGE_IP_URL=http://proxy.example.com:8080/changeip
 Проверьте файл `.env` - должна быть переменная `SPREADSHEET_ID`
 
 ### Ошибка "Failed to fetch HTML"
-- Проверьте мобильный прокси (если используется)
-- Возможно, Cian заблокировал IP
-- Попробуйте сменить IP через CHANGE_IP_URL endpoint
+- Проверьте прокси в `data/proxies.txt`
+- Возможно, Cian заблокировал IP — попробуйте другие прокси
 
 ### Ошибка "Failed to convert HTML to markdown"
 - Проверьте, что сервис `html_to_markdown` запущен

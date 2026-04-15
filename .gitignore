@@ -12,6 +12,8 @@ venv.bak/
 technical/
 cian_test/
 
+data/proxies.txt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
