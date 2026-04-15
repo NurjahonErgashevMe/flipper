@@ -131,7 +131,7 @@ async def write_postgres(pg_url: str, data: dict) -> None:
             for f in filters:
                 await session.execute(text(
                     "INSERT INTO cian_filters (id, url, meta) "
-                    "VALUES (:id, :url, :meta::jsonb) "
+                    "VALUES (:id, :url, CAST(:meta AS jsonb)) "
                     "ON CONFLICT (url) DO NOTHING"
                 ), {"id": f["id"], "url": f["url"], "meta": json.dumps(f["meta"]) if f["meta"] else None})
             await session.commit()
@@ -155,9 +155,9 @@ async def write_postgres(pg_url: str, data: dict) -> None:
                     await session.execute(text(
                         "INSERT INTO cian_active_ads "
                         "(id, url, filter_id, source, parsed_data, is_parsed, last_updated, added_at) "
-                        "VALUES (:id, :url, :filter_id, :source, :parsed_data::jsonb, :is_parsed, "
-                        "CASE WHEN :last_updated IS NOT NULL THEN :last_updated::timestamp ELSE CURRENT_TIMESTAMP END, "
-                        "CASE WHEN :added_at IS NOT NULL THEN :added_at::timestamp ELSE CURRENT_TIMESTAMP END) "
+                        "VALUES (:id, :url, :filter_id, :source, CAST(:parsed_data AS jsonb), :is_parsed, "
+                        "CASE WHEN :last_updated IS NOT NULL THEN CAST(:last_updated AS timestamp) ELSE CURRENT_TIMESTAMP END, "
+                        "CASE WHEN :added_at IS NOT NULL THEN CAST(:added_at AS timestamp) ELSE CURRENT_TIMESTAMP END) "
                         "ON CONFLICT (url) DO NOTHING"
                     ), {
                         "id": ad["id"],
@@ -186,8 +186,8 @@ async def write_postgres(pg_url: str, data: dict) -> None:
             for s in sold:
                 await session.execute(text(
                     "INSERT INTO cian_sold_ads (id, url, parsed_data, publish_date, sold_at) "
-                    "VALUES (:id, :url, :parsed_data::jsonb, :publish_date, "
-                    "CASE WHEN :sold_at IS NOT NULL THEN :sold_at::timestamp ELSE CURRENT_TIMESTAMP END) "
+                    "VALUES (:id, :url, CAST(:parsed_data AS jsonb), :publish_date, "
+                    "CASE WHEN :sold_at IS NOT NULL THEN CAST(:sold_at AS timestamp) ELSE CURRENT_TIMESTAMP END) "
                     "ON CONFLICT (url) DO NOTHING"
                 ), {
                     "id": s["id"],
