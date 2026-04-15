@@ -259,13 +259,13 @@ class SheetsManager:
         signals_bg_color: Optional[dict],
         offers_match: bool = True,
         deactivated: bool = False,
-    ) -> bool:
-        """Один batchGet для Offers_Parser + Signals_Parser, затем обновления (меньше read quota).
+    ) -> dict:
+        """Один batchGet для Offers_Parser + Signals_Parser, затем обновления.
 
-        offers_match=False — строка удаляется из Offers_Parser (критерий 200+ просмотров и т.п.).
-
-        deactivated=True — если строка уже существует, обновляет только цвет (значения ячеек не трогает),
-        чтобы не затирать критичные поля при снятии объявления с публикации.
+        Returns dict:
+            offers_ok: bool — успех записи в Offers_Parser
+            signal_added: bool — объявление впервые добавлено в Signals_Parser
+            signal_removed: bool — объявление удалено из Signals_Parser (критерии не выполняются)
         """
         by_tab = self.batch_get_value_ranges(
             [_a1_range("Offers_Parser", "A:Z"), _a1_range("Signals_Parser", "A:Z")]
@@ -287,6 +287,9 @@ class SheetsManager:
             return False
 
         signals_exists = _row_exists(signals_vals)
+        signal_added = False
+        signal_removed = False
+
         if offers_match:
             ok_offers = self.find_and_update_row(
                 "Offers_Parser",
@@ -304,9 +307,8 @@ class SheetsManager:
                 id_column_index=id_column_index,
                 existing_values=offers_vals,
             )
+
         if deactivated:
-            # При снятии объявления: если строка уже есть — меняем только цвет, значения не трогаем.
-            # Если строки нет — добавляем только если signals_match=True (то есть объявление должно быть в Signals_Parser).
             if signals_exists:
                 self.find_and_update_row(
                     "Signals_Parser",
@@ -327,8 +329,9 @@ class SheetsManager:
                     existing_values=signals_vals,
                     update_values=True,
                 )
+                signal_added = True
         else:
-            if signals_match:
+            if signals_match and not signals_exists:
                 self.find_and_update_row(
                     "Signals_Parser",
                     row,
@@ -338,9 +341,8 @@ class SheetsManager:
                     existing_values=signals_vals,
                     update_values=True,
                 )
-            elif signals_exists:
-                # Уже в Signals: продолжаем мониторинг — обновляем строку данными парсинга,
-                # даже если критерии «сигнала» сейчас не выполняются (не удаляем из вкладки).
+                signal_added = True
+            elif signals_match and signals_exists:
                 self.find_and_update_row(
                     "Signals_Parser",
                     row,
@@ -350,7 +352,20 @@ class SheetsManager:
                     existing_values=signals_vals,
                     update_values=True,
                 )
-        return ok_offers
+            elif not signals_match and signals_exists:
+                self.delete_row_by_id(
+                    "Signals_Parser",
+                    id_value=cian_id,
+                    id_column_index=id_column_index,
+                    existing_values=signals_vals,
+                )
+                signal_removed = True
+
+        return {
+            "offers_ok": ok_offers,
+            "signal_added": signal_added,
+            "signal_removed": signal_removed,
+        }
 
     def get_urls(self, tab_name: str = "FILTERS", column: str = "A") -> List[str]:
         """

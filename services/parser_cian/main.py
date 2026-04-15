@@ -2,7 +2,7 @@
 services.parser_cian.main - Entry point orchestrator
 
 Оркестратор для сервиса парсинга Cian.
-Управляет полным циклом: чтение URLs -> SQLite БД -> парсинг -> сохранение в БД и Sheets.
+Управляет полным циклом: чтение URLs -> PostgreSQL -> парсинг -> сохранение в БД и Sheets.
 """
 
 import asyncio
@@ -87,12 +87,12 @@ async def main(args):
         log_section("Step 2: Initializing Components")
 
         import os
-        os.makedirs("data", exist_ok=True)
+        os.makedirs("data/logs", exist_ok=True)
 
-        logger.info("Initializing SQLite Database...")
-        db_repo = DatabaseRepository(db_path="data/parser_cian.db")
+        logger.info("Initializing PostgreSQL Database...")
+        db_repo = DatabaseRepository(database_url=settings.database_url)
         await db_repo.init_db()
-        logger.info("✓ Database initialized")
+        logger.info("Database initialized")
 
         if args.reset_sold:
             cleared = await db_repo.clear_sold_ads()

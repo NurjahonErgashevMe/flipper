@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     Поддерживает как локальную разработку, так и Docker окружение.
     """
 
+    # === Database ===
+    database_url: str = Field(
+        default="postgresql+asyncpg://flipper:flipper_secret@app_postgres:5432/flipper",
+        description="PostgreSQL connection URL (DATABASE_URL in .env / docker-compose environment)",
+    )
+
     # === Firecrawl API ===
     firecrawl_api_key: str = ""
     """API ключ для Firecrawl (обязательно)"""
@@ -59,9 +65,8 @@ class Settings(BaseSettings):
     )
 
     # === Parser Settings ===
-    parser_concurrency: int = 20
-    """Параллельных воркеров к Firecrawl (PARSER_CONCURRENCY в .env).
-    Лимит инстанса flippercrawl-api; при ReadTimeout уменьшите. Google Sheets — max ~60 read/min (SHEETS_READ_SPACING_SEC)."""
+    parser_concurrency: int = 50
+    """Параллельных воркеров к Firecrawl (PARSER_CONCURRENCY в .env). При ReadTimeout уменьшите."""
 
     regular_search_max_pages: int = Field(
         default=100,

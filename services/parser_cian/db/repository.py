@@ -1,10 +1,10 @@
-import asyncio
 import json
 import logging
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
 from sqlalchemy import select, delete, text
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
 
 from services.parser_cian.db import base as _base
@@ -17,67 +17,30 @@ from services.parser_cian.db.base import (
 
 logger = logging.getLogger(__name__)
 
-_SQLITE_IO_RETRIES = 5
-
-
-async def _run_db_write_with_retry(coro_factory):
-    """Повтор при временных ошибках SQLite (блокировка, I/O) под параллельными воркерами."""
-    last: Optional[Exception] = None
-    for attempt in range(_SQLITE_IO_RETRIES):
-        try:
-            await coro_factory()
-            return
-        except OperationalError as e:
-            last = e
-            msg = str(e).lower()
-            if "disk i/o" in msg or "locked" in msg or "busy" in msg:
-                if attempt < _SQLITE_IO_RETRIES - 1:
-                    await asyncio.sleep(0.15 * (2**attempt))
-                    continue
-            raise
-    if last:
-        raise last
-
 
 class DatabaseRepository:
-    def __init__(self, db_path: str = "data/parser_cian.db"):
-        self.db_path = db_path
+    def __init__(self, database_url: str):
+        self.database_url = database_url
 
     async def init_db(self):
-        """Создает таблицы через SQLAlchemy."""
-        await _init_db(self.db_path)
-        logger.info(f"Database initialized at {self.db_path}")
+        await _init_db(self.database_url)
+        logger.info("Database initialized (%s)", self.database_url.split("@")[-1])
 
     # --- Filters ---
+
     async def add_filters(self, urls: List[str]):
-        """Добавляет новые ссылки-фильтры (INSERT OR IGNORE)."""
         async with _base.AsyncSessionLocal() as session:
             for url in urls:
-                stmt = sqlite_insert(CianFilter).values(url=url).on_conflict_do_nothing()
+                stmt = pg_insert(CianFilter).values(url=url).on_conflict_do_nothing()
                 await session.execute(stmt)
             await session.commit()
 
     async def sync_filters_exact(self, filters: List[Any]) -> None:
-        """
-        Таблица cian_filters = ровно список с листа FILTERS.
-        Удаляет строки, которых больше нет в листе; добавляет новые URL.
-
-        Поддерживает вход:
-        - List[str] (старый формат)
-        - List[dict] где dict содержит как минимум {"url": "..."} и опционально {"meta": {...}}
-        """
         normalized: List[Dict[str, Any]] = []
         seen: set[str] = set()
         for item in filters or []:
-            url = None
-            meta = None
-            if isinstance(item, dict):
-                url = item.get("url")
-                meta = item.get("meta")
-            else:
-                url = item
-                meta = None
-
+            url = item.get("url") if isinstance(item, dict) else item
+            meta = item.get("meta") if isinstance(item, dict) else None
             if not url:
                 continue
             s = str(url).strip()
@@ -96,7 +59,7 @@ class DatabaseRepository:
                 )
             for f in normalized:
                 stmt = (
-                    sqlite_insert(CianFilter)
+                    pg_insert(CianFilter)
                     .values(url=f["url"], meta=f.get("meta"))
                     .on_conflict_do_update(
                         index_elements=["url"],
@@ -107,7 +70,6 @@ class DatabaseRepository:
             await session.commit()
 
     async def get_all_filters(self) -> List[Dict]:
-        """Возвращает все фильтры."""
         async with _base.AsyncSessionLocal() as session:
             result = await session.execute(select(CianFilter))
             rows = result.scalars().all()
@@ -116,11 +78,6 @@ class DatabaseRepository:
     async def assign_filter_to_ads(
         self, urls: List[str], filter_id: int, source: str = "offers"
     ) -> int:
-        """Проставляет filter_id активным объявлениям, где он ещё NULL (не перезаписывает существующий).
-
-        Returns:
-            Количество обновлённых строк.
-        """
         if not urls or not filter_id:
             return 0
 
@@ -139,7 +96,7 @@ class DatabaseRepository:
             return 0
 
         total_updated = 0
-        chunk_size = 400  # <= 999 SQLite vars safe margin
+        chunk_size = 500
 
         async with _base.AsyncSessionLocal() as session:
             for i in range(0, len(ordered_unique), chunk_size):
@@ -168,7 +125,6 @@ class DatabaseRepository:
         return total_updated
 
     async def get_filter_for_ad_url(self, ad_url: str) -> Optional[Dict[str, Any]]:
-        """Возвращает фильтр (url + meta) для активного объявления по его URL."""
         if not ad_url:
             return None
         u = str(ad_url).strip()
@@ -186,32 +142,21 @@ class DatabaseRepository:
             return {"url": row[0], "meta": row[1]}
 
     # --- Active Ads ---
+
     async def add_ad_urls(
         self, urls: List[str], filter_id: Optional[int] = None, source: str = "offers"
     ):
-        """Добавляет объявления в таблицу активных (INSERT OR IGNORE)."""
         async with _base.AsyncSessionLocal() as session:
             for url in urls:
                 stmt = (
-                    sqlite_insert(CianActiveAd)
+                    pg_insert(CianActiveAd)
                     .values(url=url, filter_id=filter_id, source=source)
                     .on_conflict_do_nothing()
                 )
                 await session.execute(stmt)
             await session.commit()
-        logger.debug(f"add_ad_urls: added up to {len(urls)} URLs (source={source})")
 
     async def merge_active_ad_urls(self, urls: List[str], source: str = "offers") -> int:
-        """
-        Добавляет новые URL к существующим в cian_active_ads (INSERT OR IGNORE).
-        Не удаляет существующие записи — объявления остаются в БД до явного удаления
-        (move_to_sold или remove_stale_active_ads).
-
-        Пропускает URL-ы, которые уже есть в cian_sold_ads (уже обработаны).
-
-        Returns:
-            Количество действительно новых URL, добавленных в БД.
-        """
         ordered_unique: List[str] = []
         seen: set[str] = set()
         for u in urls:
@@ -241,7 +186,7 @@ class DatabaseRepository:
                     skipped_sold += 1
                     continue
                 stmt = (
-                    sqlite_insert(CianActiveAd)
+                    pg_insert(CianActiveAd)
                     .values(url=url, filter_id=None, source=source)
                     .on_conflict_do_nothing()
                 )
@@ -250,15 +195,14 @@ class DatabaseRepository:
             await session.commit()
 
         logger.info(
-            f"merge_active_ad_urls: source={source}, "
-            f"from_search={len(ordered_unique)}, new={added}, "
-            f"already_active={len(ordered_unique) - added - skipped_sold}, "
-            f"already_sold={skipped_sold}"
+            "merge_active_ad_urls: source=%s, from_search=%s, new=%s, "
+            "already_active=%s, already_sold=%s",
+            source, len(ordered_unique), added,
+            len(ordered_unique) - added - skipped_sold, skipped_sold,
         )
         return added
 
     async def get_all_active_ads(self, source: Optional[str] = None) -> List[str]:
-        """Получает URL активных объявлений, опционально фильтруя по source."""
         async with _base.AsyncSessionLocal() as session:
             q = select(CianActiveAd.url)
             if source:
@@ -267,7 +211,6 @@ class DatabaseRepository:
             return list(result.scalars().all())
 
     async def get_unparsed_active_ads(self, source: Optional[str] = None) -> List[str]:
-        """Активные объявления, по которым ещё не было успешного парсинга в БД (is_parsed=false)."""
         async with _base.AsyncSessionLocal() as session:
             q = select(CianActiveAd.url).where(CianActiveAd.is_parsed.is_(False))
             if source:
@@ -278,7 +221,6 @@ class DatabaseRepository:
     async def get_unparsed_active_ads_in_urls(
         self, urls: List[str], source: Optional[str] = None
     ) -> List[str]:
-        """Активные и ещё не спарсенные URL из переданного списка (пересечение с cian_active_ads)."""
         want = [str(u).strip() for u in (urls or []) if str(u).strip()]
         if not want:
             return []
@@ -293,78 +235,34 @@ class DatabaseRepository:
             return list(result.scalars().all())
 
     async def update_active_ad(self, url: str, parsed_data: Dict[str, Any]):
-        """Обновляет данные активного объявления."""
-
-        async def _do():
-            async with _base.AsyncSessionLocal() as session:
-                result = await session.execute(
-                    select(CianActiveAd).where(CianActiveAd.url == url)
-                )
-                ad = result.scalar_one_or_none()
-                if ad:
-                    ad.parsed_data = parsed_data
-                    ad.is_parsed = True
-                    await session.commit()
-
-        await _run_db_write_with_retry(_do)
+        async with _base.AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(CianActiveAd).where(CianActiveAd.url == url)
+            )
+            ad = result.scalar_one_or_none()
+            if ad:
+                ad.parsed_data = parsed_data
+                ad.is_parsed = True
+                await session.commit()
 
     async def remove_stale_active_ads(self, source: str, max_age_days: int = 7) -> int:
-        """
-        Удаляет из cian_active_ads записи, где publish_date старше max_age_days
-        и объявление было успешно спарсено (is_parsed=True, is_active остаётся True).
-
-        Это объявления, которые «отслужили своё» — были активны, но
-        выходят за окно мониторинга.
-
-        Чтение через CAST(parsed_data AS BLOB): при битом UTF-8 в TEXT ORM падает
-        с «Could not decode to UTF-8»; здесь декодируем вручную.
-
-        Returns:
-            Количество удалённых записей.
-        """
-        from datetime import datetime, timedelta
-
         cutoff = (datetime.now() - timedelta(days=max_age_days)).strftime("%Y-%m-%d")
         removed = 0
 
         async with _base.AsyncSessionLocal() as session:
             result = await session.execute(
-                text(
-                    "SELECT id, CAST(parsed_data AS BLOB) AS raw_pd "
-                    "FROM cian_active_ads "
-                    "WHERE source = :src AND is_parsed = 1"
-                ),
-                {"src": source},
+                select(CianActiveAd.id, CianActiveAd.parsed_data).where(
+                    CianActiveAd.source == source,
+                    CianActiveAd.is_parsed.is_(True),
+                )
             )
-            rows = result.fetchall()
+            rows = result.all()
 
             ids_to_delete: List[int] = []
-
-            for row in rows:
-                ad_id, raw_pd = row[0], row[1]
-                if not raw_pd:
+            for ad_id, data in rows:
+                if not isinstance(data, dict):
                     continue
-                try:
-                    s = bytes(raw_pd).decode("utf-8", errors="replace")
-                    data = json.loads(s)
-                except (json.JSONDecodeError, TypeError) as e:
-                    logger.warning(
-                        "remove_stale_active_ads: битый JSON в parsed_data id=%s: %s — сбрасываю поле",
-                        ad_id,
-                        e,
-                    )
-                    await session.execute(
-                        text(
-                            "UPDATE cian_active_ads SET parsed_data = NULL, is_parsed = 0 "
-                            "WHERE id = :id"
-                        ),
-                        {"id": ad_id},
-                    )
-                    continue
-
-                pd = None
-                if isinstance(data, dict):
-                    pd = data.get("publish_date")
+                pd = data.get("publish_date")
                 if not pd or not isinstance(pd, str):
                     continue
                 if pd < cutoff:
@@ -380,56 +278,40 @@ class DatabaseRepository:
 
         if removed:
             logger.info(
-                f"remove_stale_active_ads: source={source}, "
-                f"removed={removed} ads older than {max_age_days} days (cutoff={cutoff})"
+                "remove_stale_active_ads: source=%s, removed=%s (older than %s days, cutoff=%s)",
+                source, removed, max_age_days, cutoff,
             )
         return removed
 
     async def clear_sold_ads(self) -> int:
-        """Удаляет все записи из cian_sold_ads. Используется для сброса при изменении логики."""
         async with _base.AsyncSessionLocal() as session:
             result = await session.execute(delete(CianSoldAd))
             count = result.rowcount
             await session.commit()
-        logger.info(f"clear_sold_ads: removed {count} records")
+        logger.info("clear_sold_ads: removed %s records", count)
         return count
 
     async def move_to_sold(self, url: str, parsed_data: Dict[str, Any], publish_date: str):
-        """Удаляет объявление из активных и добавляет в проданные."""
-
-        async def _do():
-            async with _base.AsyncSessionLocal() as session:
-                await session.execute(
-                    delete(CianActiveAd).where(CianActiveAd.url == url)
-                )
-                stmt = (
-                    sqlite_insert(CianSoldAd)
-                    .values(
-                        url=url,
-                        parsed_data=parsed_data,
-                        publish_date=publish_date,
-                    )
-                    .on_conflict_do_nothing()
-                )
-                await session.execute(stmt)
-                await session.commit()
-
-        await _run_db_write_with_retry(_do)
-        logger.info(f"Moved to sold: {url}")
+        async with _base.AsyncSessionLocal() as session:
+            await session.execute(
+                delete(CianActiveAd).where(CianActiveAd.url == url)
+            )
+            stmt = (
+                pg_insert(CianSoldAd)
+                .values(url=url, parsed_data=parsed_data, publish_date=publish_date)
+                .on_conflict_do_nothing()
+            )
+            await session.execute(stmt)
+            await session.commit()
+        logger.info("Moved to sold: %s", url)
 
     async def delete_active_ad(self, url: str) -> int:
-        """Удаляет объявление из cian_active_ads (перестаём отслеживать), без добавления в sold."""
-
-        removed: int = 0
-
-        async def _do():
-            nonlocal removed
-            async with _base.AsyncSessionLocal() as session:
-                result = await session.execute(delete(CianActiveAd).where(CianActiveAd.url == url))
-                removed = int(result.rowcount or 0)
-                await session.commit()
-
-        await _run_db_write_with_retry(_do)
+        async with _base.AsyncSessionLocal() as session:
+            result = await session.execute(
+                delete(CianActiveAd).where(CianActiveAd.url == url)
+            )
+            removed = int(result.rowcount or 0)
+            await session.commit()
         if removed:
             logger.info("delete_active_ad: removed url=%s", url)
         return removed

@@ -316,8 +316,10 @@ async def _amain(args: argparse.Namespace) -> None:
     from services.parser_cian.config import validate_config
     from services.parser_cian.db.repository import DatabaseRepository
 
+    from services.parser_cian.config import settings
     validate_config()
-    db = DatabaseRepository(db_path=args.db)
+    db_url = args.database_url or settings.database_url
+    db = DatabaseRepository(database_url=db_url)
     await db.init_db()
 
     urls: list[str] = []
@@ -341,7 +343,7 @@ async def _amain(args: argparse.Namespace) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--db", default="data/parser_cian.db", help="Путь к SQLite")
+    ap.add_argument("--database-url", default="", help="PostgreSQL URL (default: from settings)")
     ap.add_argument(
         "--from-sheet",
         action="store_true",
