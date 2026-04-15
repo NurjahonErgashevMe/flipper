@@ -2,17 +2,17 @@
 
 ## Требования
 
-- Linux VPS (Ubuntu 22.04+ / Debian 12+)
+- Linux VPS (Ubuntu 22.04+ / Debian 12+), рекомендуется Timeweb Cloud
 - Docker Engine 24+ и Docker Compose Plugin v2
 - Git
-- Минимум 2 GB RAM, 20 GB disk
+- Минимум 4 GB RAM, 40 GB disk (Firecrawl + Flipper + PostgreSQL)
 
 ---
 
 ## 1. Подготовка сервера
 
 ```bash
-# Установить Docker (если ещё нет)
+# Установить Docker
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER
 # Перелогиниться чтобы группа docker подхватилась
@@ -20,15 +20,79 @@ sudo usermod -aG docker $USER
 
 ---
 
-## 2. Клонирование и настройка
+## 2. Flippercrawl (self-hosted Firecrawl)
+
+Firecrawl деплоится **отдельным** docker-compose. Flipper подключается к нему через общую Docker-сеть `firecrawl_backend`.
+
+### 2.1 Клонировать и настроить Firecrawl
 
 ```bash
-cd /opt  # или любой каталог
+cd /opt
+git clone https://github.com/mendableai/firecrawl.git flippercrawl
+cd flippercrawl
+```
+
+Скопировать и отредактировать `.env`:
+
+```bash
+cp apps/api/.env.example apps/api/.env
+nano apps/api/.env
+```
+
+Ключевые переменные:
+
+```env
+# Можно оставить пустым для self-hosted без auth
+FIRECRAWL_API_KEY=local
+
+# LLM для AI-экстракции (используется parser_cian)
+# OpenRouter / любой OpenAI-совместимый endpoint
+OPENAI_API_KEY=sk-or-v1-...
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+MODEL_NAME=glm-4-9b-chat
+```
+
+### 2.2 Запустить Flippercrawl
+
+```bash
+cd /opt/flippercrawl
+docker compose up -d
+```
+
+Проверить:
+
+```bash
+# API должен отвечать на порту 3002
+curl http://localhost:3002/
+```
+
+### 2.3 Убедиться что сеть создана
+
+Firecrawl автоматически создаёт сеть. Flipper подключается к ней как `external`. Проверить:
+
+```bash
+docker network ls | grep firecrawl_backend
+```
+
+Если сети нет (Firecrawl ещё не поднят или использует другое имя):
+
+```bash
+docker network create firecrawl_backend
+```
+
+> **Важно:** имя сети в `docker-compose.yml` Flipper — `firecrawl_backend`. Если в вашем Firecrawl она называется иначе, поменяйте в `docker-compose.yml` Flipper секцию `networks`.
+
+---
+
+## 3. Flipper — клонирование и настройка
+
+```bash
+cd /opt
 git clone <repo-url> flipper
 cd flipper
 ```
 
-### 2.1 Файл окружения
+### 3.1 Файл окружения
 
 ```bash
 cp .env.example .env
@@ -39,28 +103,42 @@ nano .env
 
 | Переменная | Описание |
 |---|---|
-| `FIRECRAWL_API_KEY` | API-ключ Firecrawl |
+| `FIRECRAWL_API_KEY` | `local` (self-hosted без auth) |
+| `FIRECRAWL_BASE_URL` | URL Firecrawl API (см. ниже) |
 | `SPREADSHEET_ID` | ID Google Sheets документа |
 | `TG_BOT_TOKEN` | Telegram бот токен |
 | `TG_CHAT_ID` | ID чата для уведомлений |
-| `POSTGRES_PASSWORD` | Пароль PostgreSQL (по умолчанию `flipper_secret`) |
+| `POSTGRES_PASSWORD` | Пароль PostgreSQL |
+| `NOVNC_PUBLIC_URL` | `http://<IP сервера>:8080/vnc.html` |
 
-Опциональные:
+#### Firecrawl URL — какой указать?
 
-| Переменная | Описание |
-|---|---|
-| `PARSER_FIRECRAWL_BASE_URL` | URL Firecrawl если в той же Docker-сети |
-| `NOVNC_PUBLIC_URL` | Публичный URL NoVNC для Telegram |
-| `PARSER_CONCURRENCY` | Кол-во воркеров парсера (default: 20) |
+В `docker-compose.yml` parser_cian подключён к сети `firecrawl_backend`, поэтому может обращаться к Firecrawl по имени контейнера:
 
-### 2.2 Google Credentials
-
-```bash
-# Скопировать файл сервисного аккаунта Google
-scp credentials.json user@server:/opt/flipper/credentials.json
+```env
+# Имя контейнера Firecrawl API (обычно <project>-api-1)
+# Проверить: docker ps --format '{{.Names}}' | grep api
+FIRECRAWL_BASE_URL=http://flippercrawl-api-1:3002
 ```
 
-### 2.3 Прокси (опционально)
+Если DNS по имени контейнера не работает, используется fallback через хост:
+
+```env
+# Fallback — через host.docker.internal (настроено в docker-compose.yml)
+# Работает если Firecrawl публикует порт 3002 на хосте
+FIRECRAWL_BASE_URL=http://host.docker.internal:3002
+```
+
+> Проверить имя контейнера: `docker ps --format '{{.Names}}' | grep api`
+
+### 3.2 Google Credentials
+
+```bash
+# С локальной машины
+scp credentials.json root@<server-ip>:/opt/flipper/credentials.json
+```
+
+### 3.3 Прокси (резидентские)
 
 ```bash
 mkdir -p data
@@ -68,34 +146,33 @@ mkdir -p data
 nano data/proxies.txt
 ```
 
----
-
-## 3. Создание внешней сети Firecrawl
+Или скопировать готовый файл:
 
 ```bash
-# Если Firecrawl запущен в отдельном compose и сеть ещё не создана:
-docker network create firecrawl_backend 2>/dev/null || true
+scp data/proxies.txt root@<server-ip>:/opt/flipper/data/proxies.txt
 ```
 
 ---
 
-## 4. Сборка и запуск
+## 4. Сборка и запуск Flipper
 
 ```bash
+cd /opt/flipper
+
 # Собрать все образы
 docker compose build
 
-# Запустить инфраструктуру (postgres, redis, cookie_manager, html_to_markdown, scheduler)
+# Запустить инфраструктуру
 docker compose up -d
 ```
 
-Проверить что всё поднялось:
+Проверить:
 
 ```bash
 docker compose ps
 ```
 
-Ожидаемый вывод — все сервисы `running (healthy)`:
+Ожидаемый результат:
 
 ```
 app_postgres      running (healthy)
@@ -107,25 +184,34 @@ flipper_scheduler running
 
 > `parser_cian` и `category_counter` имеют `profiles: [manual]` — они **не** запускаются в `docker compose up`. Их запускает `scheduler` автоматически по расписанию.
 
+### Проверить связность с Firecrawl
+
+```bash
+docker compose run --rm parser_cian python -c "
+import httpx, os
+url = os.environ.get('FIRECRAWL_BASE_URL', 'http://host.docker.internal:3002')
+r = httpx.get(url, timeout=5)
+print(f'{url} -> {r.status_code}')
+"
+```
+
 ---
 
 ## 5. Миграция данных из SQLite в PostgreSQL
 
-> **Этот шаг выполняется один раз при переходе с SQLite.**
-> Если деплоите с нуля (без старой БД) — пропустите этот раздел.
+> **Выполняется один раз при переходе с SQLite.**
+> Если деплоите с нуля — пропустите этот раздел.
 
 ### 5.1 Копирование файла БД на сервер
 
 ```bash
-# С локальной машины
-scp data/parser_cian.db user@server:/opt/flipper/data/parser_cian.db
+scp data/parser_cian.db root@<server-ip>:/opt/flipper/data/parser_cian.db
 ```
 
 ### 5.2 Убедиться что PostgreSQL запущен
 
 ```bash
 docker compose up -d app_postgres
-# Подождать healthcheck
 docker compose exec app_postgres pg_isready -U flipper
 ```
 
@@ -154,10 +240,9 @@ docker compose exec app_postgres psql -U flipper -c "
 "
 ```
 
-### 5.5 Удаление старого файла (опционально)
+### 5.5 Удаление старого файла
 
 ```bash
-# После успешной проверки
 rm data/parser_cian.db
 ```
 
@@ -165,7 +250,7 @@ rm data/parser_cian.db
 
 ## 6. Расписание (автоматическое)
 
-Scheduler уже запущен в шаге 4. Он работает по расписанию:
+Scheduler запущен в шаге 4. Расписание:
 
 | Время (MSK) | Задача |
 |---|---|
@@ -204,17 +289,17 @@ docker compose run --rm category_counter
 ### Логи
 
 ```bash
-# Все сервисы
+# Все сервисы Flipper
 docker compose logs -f
 
-# Только scheduler
+# Scheduler
 docker compose logs -f scheduler
 
 # Последний запуск parser_cian
 docker compose logs parser_cian
 
-# PostgreSQL
-docker compose logs app_postgres
+# Firecrawl (из другого каталога)
+cd /opt/flippercrawl && docker compose logs -f api
 ```
 
 ### Состояние БД
@@ -240,17 +325,21 @@ docker compose exec app_postgres psql -U flipper -c "
 
 ## 9. Обновление
 
+### Flipper
+
 ```bash
 cd /opt/flipper
 git pull
-
-# Пересобрать и перезапустить
 docker compose build
 docker compose up -d
+```
 
-# Если изменились зависимости parser_cian/scheduler — пересобрать конкретный сервис:
-docker compose build parser_cian scheduler
-docker compose up -d scheduler
+### Flippercrawl
+
+```bash
+cd /opt/flippercrawl
+git pull
+docker compose up -d --build
 ```
 
 ---
@@ -265,15 +354,14 @@ docker compose exec app_postgres pg_dump -U flipper flipper > backup_$(date +%Y%
 cat backup_20260415.sql | docker compose exec -T app_postgres psql -U flipper flipper
 ```
 
-Для автоматических бэкапов — добавить в crontab хоста:
-
-```bash
-# Каждый день в 3:00 — бэкап PostgreSQL
-0 3 * * * cd /opt/flipper && docker compose exec -T app_postgres pg_dump -U flipper flipper | gzip > /opt/flipper/backups/flipper_$(date +\%Y\%m\%d).sql.gz
-```
+Автоматические бэкапы — crontab хоста:
 
 ```bash
 mkdir -p /opt/flipper/backups
+
+# Добавить в crontab -e:
+# Каждый день в 3:00
+0 3 * * * cd /opt/flipper && docker compose exec -T app_postgres pg_dump -U flipper flipper | gzip > /opt/flipper/backups/flipper_$(date +\%Y\%m\%d).sql.gz
 ```
 
 ---
@@ -281,60 +369,86 @@ mkdir -p /opt/flipper/backups
 ## 11. Структура сервисов
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Docker Compose                                     │
-│                                                     │
-│  ┌──────────────┐   cron    ┌──────────────────┐   │
-│  │  scheduler   │──────────▶│   parser_cian    │   │
-│  │  (always on) │           │   (on-demand)    │   │
-│  │              │──────┐    └────────┬─────────┘   │
-│  └──────────────┘      │             │              │
-│                        │             ▼              │
-│                        │    ┌──────────────────┐   │
-│                        └───▶│ category_counter │   │
-│                             │   (on-demand)    │   │
-│                             └──────────────────┘   │
-│                                                     │
-│  ┌──────────────┐    ┌──────────────────┐          │
-│  │ app_postgres │    │  cookie_manager  │          │
-│  │ (PostgreSQL) │    │ (FastAPI+NoVNC)  │          │
-│  └──────────────┘    └──────────────────┘          │
-│                                                     │
-│  ┌──────────────┐    ┌──────────────────┐          │
-│  │  app_redis   │    │ html_to_markdown │          │
-│  │   (cache)    │    │   (Go service)   │          │
-│  └──────────────┘    └──────────────────┘          │
-└─────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  /opt/flippercrawl (отдельный docker-compose)                     │
+│                                                                    │
+│  ┌─────────────┐  ┌───────────┐  ┌───────────┐  ┌─────────────┐  │
+│  │ firecrawl   │  │ playwright│  │  redis     │  │  rabbitmq   │  │
+│  │ API :3002   │  │  service  │  │           │  │             │  │
+│  └──────┬──────┘  └───────────┘  └───────────┘  └─────────────┘  │
+│         │ сеть: firecrawl_backend                                  │
+└─────────┼──────────────────────────────────────────────────────────┘
+          │
+          │ docker network (firecrawl_backend)
+          │
+┌─────────┼──────────────────────────────────────────────────────────┐
+│  /opt/flipper (docker-compose)                                     │
+│         │                                                          │
+│         ▼                                                          │
+│  ┌──────────────┐   cron    ┌──────────────────┐                  │
+│  │  scheduler   │──────────▶│   parser_cian    │──── Firecrawl    │
+│  │  (always on) │           │   (on-demand)    │                  │
+│  │              │──────┐    └────────┬─────────┘                  │
+│  └──────────────┘      │             │                             │
+│                        │             ▼                             │
+│                        │    ┌──────────────────┐                  │
+│                        └───▶│ category_counter │                  │
+│                             │   (on-demand)    │                  │
+│                             └──────────────────┘                  │
+│                                                                    │
+│  ┌──────────────┐    ┌──────────────────┐                         │
+│  │ app_postgres │    │  cookie_manager  │                         │
+│  │ (PostgreSQL) │    │ (FastAPI+NoVNC)  │                         │
+│  └──────────────┘    └──────────────────┘                         │
+│                                                                    │
+│  ┌──────────────┐    ┌──────────────────┐                         │
+│  │  app_redis   │    │ html_to_markdown │                         │
+│  └──────────────┘    └──────────────────┘                         │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Troubleshooting
 
+### Firecrawl не отвечает из parser_cian
+
+```bash
+# Проверить что Firecrawl запущен
+cd /opt/flippercrawl && docker compose ps
+
+# Проверить имя контейнера API
+docker ps --format '{{.Names}}' | grep api
+
+# Проверить что сеть firecrawl_backend существует и оба compose подключены
+docker network inspect firecrawl_backend --format '{{range .Containers}}{{.Name}} {{end}}'
+
+# Тест из контейнера parser_cian
+docker compose run --rm parser_cian python -c "
+import httpx, os
+url = os.environ.get('FIRECRAWL_BASE_URL', 'http://host.docker.internal:3002')
+print(httpx.get(url, timeout=5).status_code)
+"
+```
+
 ### PostgreSQL не стартует
 
 ```bash
 docker compose logs app_postgres
-# Проверить что volume pgdata доступен
 docker volume ls | grep pgdata
 ```
 
-### parser_cian не может подключиться к PostgreSQL
+### parser_cian не подключается к PostgreSQL
 
 ```bash
-# Проверить сеть
-docker compose exec parser_cian ping -c 1 app_postgres
-
-# Проверить DATABASE_URL
 docker compose run --rm parser_cian env | grep DATABASE_URL
+docker compose exec app_postgres pg_isready -U flipper
 ```
 
 ### Scheduler не запускает задачи
 
 ```bash
 docker compose logs -f scheduler | grep -E "START|END|FAILED"
-
-# Проверить что docker.sock примонтирован
 docker compose exec flipper_scheduler docker ps
 ```
 
@@ -348,10 +462,11 @@ docker compose exec flipper_scheduler docker ps
 
 ## Порты
 
-| Порт | Сервис |
-|---|---|
-| 5432 | PostgreSQL |
-| 6379 | Redis |
-| 8000 | Cookie Manager API |
-| 8080 | NoVNC |
-| 8090 | HTML to Markdown |
+| Порт | Сервис | Проект |
+|---|---|---|
+| 3002 | Firecrawl API | flippercrawl |
+| 5432 | PostgreSQL | flipper |
+| 6379 | Redis | flipper |
+| 8000 | Cookie Manager API | flipper |
+| 8080 | NoVNC | flipper |
+| 8090 | HTML to Markdown | flipper |

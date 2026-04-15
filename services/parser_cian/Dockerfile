@@ -11,18 +11,14 @@ WORKDIR /app
 COPY services/parser_cian/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Устанавливаем локальный cianparser
-COPY services/parser_cian/cianparser/ ./cianparser_temp/
-RUN pip install --no-cache-dir ./cianparser_temp/ && rm -rf ./cianparser_temp/
-
 # Копируем общие пакеты (ядро) в корень контейнера
 COPY packages/ ./packages/
 
 # Копируем код микросервиса парсера
 COPY services/parser_cian/ ./services/parser_cian/
 
-# Добавляем корень проекта в пути поиска Python
-ENV PYTHONPATH="/app:/app/services"
+# Добавляем корень проекта и встроенный cianparser в пути поиска Python
+ENV PYTHONPATH="/app:/app/services:/app/services/parser_cian/cianparser"
 
 # ENTRYPOINT чтобы docker compose run ... --skip-links --mode avans прокидывались
 ENTRYPOINT ["python", "-m", "services.parser_cian.main"]
