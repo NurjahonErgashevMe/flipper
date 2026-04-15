@@ -1,6 +1,6 @@
 """
 test_parser.py — тестирование реального парсинга объявлений Cian через AdParser
-с проверкой критериев распределения по табам (Avans, Offers_Parser, Signals_Parser).
+с проверкой критериев распределения по табам (Аванс, Offers_Parser, Signals_Parser).
 
 Результаты: JSON-файлы в parsed_data/ + сводка + вердикт по критериям.
 """
@@ -26,7 +26,7 @@ for _env_key, (_docker_host, _local_host) in _DOCKER_TO_LOCAL.items():
 
 from services.parser_cian.parser import AdParser  # noqa: E402
 from services.parser_cian.models import ParsedAdData, parse_to_sheets_row  # noqa: E402
-from services.parser_cian.queue_manager import check_signals  # noqa: E402
+from services.parser_cian.queue_manager import check_signals, _is_avans_deposit  # noqa: E402
 from services.parser_cian.config import settings  # noqa: E402
 
 logging.basicConfig(
@@ -46,16 +46,19 @@ def evaluate_criteria(parsed: ParsedAdData) -> dict:
     parsed_dict = parsed.model_dump(mode="json")
     price_history = parsed_dict.get("price_history", [])
 
-    avans_match = (
+    offers_match = (
         parsed.unique_views is not None
         and parsed.unique_views >= settings.min_unique_views
     )
     signal_reason = check_signals(price_history)
+    has_avans = _is_avans_deposit(parsed)
 
     return {
-        "avans_match": avans_match,
+        "offers_match": offers_match,
         "signal_reason": signal_reason,
         "signals_match": bool(signal_reason),
+        "has_avans": has_avans,
+        "has_avans_ai": parsed.has_avans_deposit,
         "is_active": parsed.is_active,
         "unique_views": parsed.unique_views,
     }
@@ -84,22 +87,25 @@ def dump_result(parsed: ParsedAdData) -> None:
     )
 
     tab_dest = []
-    if criteria["avans_match"]:
-        c = "#B5D6A8 (снято)" if not criteria["is_active"] else "highlight"
-        tab_dest.append(f"Avans [{c}]")
+    if criteria["has_avans"]:
+        tab_dest.append("Аванс_Продано")
+    if criteria["offers_match"]:
+        c = "#D9D9D9 (снято)" if not criteria["is_active"] else ""
+        tab_dest.append(f"Offers_Parser{' ' + c if c else ''}")
     if criteria["signals_match"]:
-        c = "#B5D6A8 (снято)" if not criteria["is_active"] else "highlight"
-        tab_dest.append(f"Signals_Parser [{c}]")
+        c = "#D9D9D9 (снято)" if not criteria["is_active"] else ""
+        tab_dest.append(f"Signals_Parser{' ' + c if c else ''}")
     if not criteria["is_active"]:
-        tab_dest.append("SOLD")
+        tab_dest.append("Продано")
 
     logger.info(
         f"  КРИТЕРИИ {cian_id}: "
-        f"avans={criteria['avans_match']} (views={criteria['unique_views']}), "
+        f"has_avans={criteria['has_avans']}, "
+        f"offers={criteria['offers_match']} (views={criteria['unique_views']}), "
         f"signals={criteria['signals_match']} reason=[{reason}], "
         f"active={criteria['is_active']}"
     )
-    logger.info(f"  ТАБЫ: {', '.join(tab_dest) if tab_dest else 'Offers_Parser only'}")
+    logger.info(f"  ТАБЫ: {', '.join(tab_dest) if tab_dest else '(нет критериев)'}")
     logger.info(f"  Sheets row ({len(sheets_row)} cols): {sheets_row}")
 
 
@@ -125,17 +131,11 @@ async def worker(
 
 
 async def test_ads():
-    avans_test_ids = [
-        "327319662", "326136551", "327286056", "327026617",
-        "325148945", "327658782", "327625195", "327084708", "328101429",
+    urls_to_test = [
+        "https://www.cian.ru/sale/flat/327273828/",
+        "https://www.cian.ru/sale/flat/328663696/",
+        "https://www.cian.ru/sale/flat/297346236/",
     ]
-    signals_test_ids = [
-        "326325288", "326142608", "327916822", "321956427",
-        "327700124", "328211713", "328599168", "327527118", "322434813",
-    ]
-
-    all_ids = avans_test_ids + signals_test_ids
-    urls_to_test = [f"https://www.cian.ru/sale/flat/{cid}/" for cid in all_ids]
 
     parser = AdParser(
         cookie_manager_url=os.getenv("COOKIE_MANAGER_URL", "http://localhost:8000"),
@@ -167,25 +167,38 @@ async def test_ads():
         f"всего={stats['ok'] + stats['fail']}"
     )
 
-    logger.info("\n" + "=" * 80)
+    logger.info("\n" + "=" * 110)
     logger.info("СВОДНАЯ ТАБЛИЦА КРИТЕРИЕВ")
-    logger.info("=" * 80)
+    logger.info("=" * 110)
     logger.info(
-        f"{'ID':<12} {'Views':>6} {'Active':>7} {'Avans':>6} "
-        f"{'Signal':>7} {'Reason':<35}"
+        f"{'ID':<12} {'Views':>6} {'Active':>7} {'AI_Avans':>9} "
+        f"{'Result':>7} {'Offers':>7} {'Signal':>7} {'Reason':<35}"
     )
-    logger.info("-" * 80)
+    logger.info("-" * 110)
 
+    avans_sold_count = 0
     for parsed in stats["results"]:
         c = evaluate_criteria(parsed)
         cid = parsed.cian_id or "?"
+        if c["has_avans"]:
+            avans_sold_count += 1
+        ai_val = c.get("has_avans_ai")
+        ai_str = "TRUE" if ai_val is True else ("FALSE" if ai_val is False else "N/A")
         logger.info(
             f"{cid:<12} {str(c['unique_views'] or '-'):>6} "
             f"{'Y' if c['is_active'] else 'N':>7} "
-            f"{'YES' if c['avans_match'] else '-':>6} "
+            f"{ai_str:>9} "
+            f"{'YES' if c['has_avans'] else '-':>7} "
+            f"{'YES' if c['offers_match'] else '-':>7} "
             f"{'YES' if c['signals_match'] else '-':>7} "
             f"{c['signal_reason'] or '-':<35}"
         )
+
+    logger.info("=" * 110)
+    logger.info(
+        f"Аванс_Продано: {avans_sold_count} из {len(stats['results'])} "
+        f"(AI определила внесение аванса/задатка)"
+    )
 
 
 if __name__ == "__main__":

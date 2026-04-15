@@ -7,7 +7,7 @@ services.parser_cian.search_parser - Search URL extraction with cianparser
 
 import re
 import logging
-from typing import List
+from typing import List, Optional, Sequence, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,8 @@ def extract_ad_urls_from_search(
     search_url: str,
     location: str = "Москва",
     max_pages: int = 50,
-    http_proxy: str = None,
+    http_proxy: Optional[str] = None,
+    proxy_urls: Optional[Sequence[str]] = None,
     list_html_loader=None,
     duplicate_streak_to_stop: int = 2,
 ) -> List[str]:
@@ -27,8 +28,9 @@ def extract_ad_urls_from_search(
         search_url: URL поисковой страницы (например, с фильтрами)
         location: Город (по умолчанию "Москва")
         max_pages: Максимальное количество страниц пагинации для парсинга (по умолчанию 50)
-        http_proxy: URL прокси для прямых запросов (если Decodo из env не подключился)
-        list_html_loader: явный загрузчик HTML; иначе CianParser сам пробует Decodo из env (приоритет над прокси)
+        http_proxy: один URL прокси (если proxy_urls не задан)
+        proxy_urls: список прокси для ProxyPool (резидентские и т.д.) — приоритет над http_proxy
+        list_html_loader: опциональный callable(url) -> str для HTML списков (иначе прямой GET + прокси)
         duplicate_streak_to_stop: стоп после стольких подряд страниц без новых URL (ложный дубль первых страниц)
 
     Returns:
@@ -53,7 +55,12 @@ def extract_ad_urls_from_search(
     
     try:
         # Инициализируем парсер
-        proxies = [http_proxy] if http_proxy else None
+        if proxy_urls:
+            proxies = list(proxy_urls)
+        elif http_proxy:
+            proxies = [http_proxy]
+        else:
+            proxies = None
         parser = cianparser.CianParser(
             location=location,
             proxies=proxies,
@@ -135,7 +142,8 @@ def extract_batch_from_searches(
     search_urls: List[str],
     location: str = "Москва",
     max_pages: int = 50,
-    http_proxy: str = None,
+    http_proxy: Optional[str] = None,
+    proxy_urls: Optional[Sequence[str]] = None,
     change_ip_callback=None,
     list_html_loader=None,
     duplicate_streak_to_stop: int = 2,
@@ -147,7 +155,8 @@ def extract_batch_from_searches(
         search_urls: Список поисковых URL
         location: Город
         max_pages: Максимальное количество страниц для каждой поисковой ссылки
-        http_proxy: URL прокси
+        http_proxy: один URL прокси
+        proxy_urls: список прокси (ротация через cianparser.ProxyPool)
         change_ip_callback: Функция для смены IP перед каждой страницей
         list_html_loader: callable(url) -> str — внешняя загрузка HTML списков
         duplicate_streak_to_stop: подряд страниц без новых URL перед остановкой
@@ -173,6 +182,7 @@ def extract_batch_from_searches(
                 location=location,
                 max_pages=max_pages,
                 http_proxy=http_proxy,
+                proxy_urls=proxy_urls,
                 list_html_loader=list_html_loader,
                 duplicate_streak_to_stop=duplicate_streak_to_stop,
             )
@@ -185,3 +195,54 @@ def extract_batch_from_searches(
     
     logger.info(f"Total ad URLs extracted: {len(all_ad_urls)}")
     return all_ad_urls
+
+
+def extract_urls_by_searches(
+    search_urls: List[str],
+    location: str = "Москва",
+    max_pages: int = 50,
+    http_proxy: Optional[str] = None,
+    proxy_urls: Optional[Sequence[str]] = None,
+    change_ip_callback=None,
+    list_html_loader=None,
+    duplicate_streak_to_stop: int = 2,
+) -> Dict[str, List[str]]:
+    """
+    То же, что extract_batch_from_searches, но возвращает отображение:
+    search_url -> список ссылок объявлений.
+    """
+    urls_by_search: Dict[str, List[str]] = {}
+
+    for i, search_url in enumerate(search_urls or [], 1):
+        if not search_url:
+            continue
+        logger.info(f"Processing search URL {i}/{len(search_urls)}")
+
+        if change_ip_callback:
+            try:
+                change_ip_callback()
+            except Exception as e:
+                logger.warning(f"Failed to change IP: {e}")
+
+        try:
+            urls = extract_ad_urls_from_search(
+                search_url=search_url,
+                location=location,
+                max_pages=max_pages,
+                http_proxy=http_proxy,
+                proxy_urls=proxy_urls,
+                list_html_loader=list_html_loader,
+                duplicate_streak_to_stop=duplicate_streak_to_stop,
+            )
+            urls_by_search[search_url] = urls
+            logger.info(f"Added {len(urls)} URLs from search page {i}")
+        except Exception as e:
+            logger.error(f"Skipping search URL {i} due to error: {e}")
+            continue
+
+    logger.info(
+        "Total search URLs processed: %s; total extracted URLs: %s",
+        len(urls_by_search),
+        sum(len(v) for v in urls_by_search.values()),
+    )
+    return urls_by_search

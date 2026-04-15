@@ -181,6 +181,12 @@ class ParsedAdData(BaseModel):
         description="Активно ли объявление. False если снято с публикации/продано.",
     )
 
+    # Аванс/задаток (режим avans; извлекает AI по схеме Firecrawl)
+    has_avans_deposit: Optional[bool] = Field(
+        None,
+        description="На карточке есть признак внесённого аванса/задатка за объект.",
+    )
+
     # История цен
     price_history: Optional[List[PriceHistoryEntry]] = Field(
         None,
@@ -217,6 +223,10 @@ def parse_to_sheets_row(data: ParsedAdData, reason: str = "") -> List[Any]:
         Список значений для одной строки таблицы
     """
 
+    description = data.description or ""
+    if data.is_active is False:
+        description = "Объявление снято с публикации"
+
     addr_full = data.address.full if data.address and data.address.full else ""
     district = data.address.district if data.address and data.address.district else ""
     metro_station = (
@@ -236,13 +246,13 @@ def parse_to_sheets_row(data: ParsedAdData, reason: str = "") -> List[Any]:
 
     # Порядок 1:1 соответствует шапке таблицы Offers_Parser / Avans:
     # A..V — данные объявления, W — reason
-    return [
+    row = [
         data.url or "",                                    # A: URL
         data.publish_date or "",                           # B: Дата публикации
         data.price or "",                                  # C: Цена
         data.title or "",                                  # D: Заголовок
         addr_full,                                         # E: Полный адрес
-        data.description or "",                            # F: Описание
+        description,                                       # F: Описание
         data.price_per_m2 if data.price_per_m2 else "",   # G: Цена за м²
         data.area if data.area is not None else "",        # H: Площадь
         data.construction_year or "",                      # I: Год постройки
@@ -261,3 +271,4 @@ def parse_to_sheets_row(data: ParsedAdData, reason: str = "") -> List[Any]:
         parsed_at_str,                                     # V: Время парсинга
         reason,                                            # W: Reason (signals)
     ]
+    return row

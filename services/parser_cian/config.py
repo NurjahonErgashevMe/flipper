@@ -29,20 +29,18 @@ class Settings(BaseSettings):
     firecrawl_base_url: str = "http://localhost:3002"
     """Self-hosted Firecrawl (без /v2/scrape). В Docker: http://flippercrawl-api-1:3002"""
 
-    # === Decodo Scraper API (HTML списков объявлений, обход бана IP) ===
-    # Подключение: CianParser сам читает DECODO_* из окружения (приоритет над прокси для списков).
+    use_proxies_for_search: bool = Field(
+        default=True,
+        description="Если True и в proxies_file есть строки — HTML страниц списков Cian через прокси (curl_cffi).",
+    )
 
-    decodo_scraper_url: str = "https://scraper-api.decodo.com/v2/scrape"
-    """Endpoint v2/scrape"""
-
-    decodo_auth_token: str = ""
-    """Decodo Scraper API: base64 для заголовка Authorization: Basic <token> (как в кабинете)"""
-
-    decodo_max_retries: int = 5
-    """Повторы запроса при капче/битом HTML"""
+    proxies_file: str = Field(
+        default="data/proxies.txt",
+        description="Файл host:port:user:pass по строке (CIAN_PROXIES_FILE в .env).",
+    )
 
     html_to_markdown_url: str = ""
-    """Базовый URL сервиса go-html-to-md (например http://html_to_markdown:8080). Пусто — markdown не тянем из Decodo-потока."""
+    """Базовый URL сервиса go-html-to-md (например http://html_to_markdown:8080). Пусто — markdown не конвертируем."""
 
     # === Cookie Manager ===
     cookie_manager_url: str = "http://cookie_manager:8000"
@@ -77,11 +75,32 @@ class Settings(BaseSettings):
         ge=1,
         le=20,
         description="Остановить пагинацию после N подряд страниц без новых ссылок (PARSER_SEARCH_DUPLICATE_STREAK_STOP). "
-        "1 = как раньше (частый обрыв при ложном дубле p=2 из-за капчи/Decodo).",
+        "1 = как раньше (частый обрыв при ложном дубле p=2 из-за капчи/битого HTML).",
     )
 
     min_unique_views: int = 200
     """Минимальное количество уникальных просмотров за сегодня для выделения цветом (Offers_Parser)"""
+
+    ad_max_age_days: int = Field(
+        default=7,
+        ge=1,
+        description="Макс. возраст объявления (дней от publish_date). "
+        "Используется только если включена очистка CLEANUP_STALE_ACTIVE_ADS (AD_MAX_AGE_DAYS).",
+    )
+
+    cleanup_stale_active_ads: bool = Field(
+        default=False,
+        description="Если True — удалять из БД активные объявления старше ad_max_age_days "
+        "после парсинга (CLEANUP_STALE_ACTIVE_ADS). "
+        "Если False — объявления отслеживаются до снятия с публикации.",
+    )
+
+    sold_max_age_days: int = Field(
+        default=7,
+        ge=1,
+        description="Объявление попадает в Продано / Аванс_Продано только если от publish_date "
+        "до сегодня прошло не больше этого значения дней (SOLD_MAX_AGE_DAYS).",
+    )
 
     # === Avans Parser Settings ===
     avans_search_url: str = Field(
@@ -95,11 +114,16 @@ class Settings(BaseSettings):
     tg_chat_id: str = Field(default="", description="ID чата для отправки уведомлений")
 
     # === Colors ===
-    sheet_highlight_color: dict = {"red": 1.0, "green": 0.9, "blue": 0.7}
-    """Цвет выделения строк в Google Sheets (RGB)"""
+    sheet_highlight_color: dict = {"red": 0.71, "green": 0.84, "blue": 0.66}
+    """Зеленоватый цвет выделения строк в Google Sheets (RGB) — unique_views ≥ min_unique_views"""
 
-    sheet_deactivated_color: dict = {"red": 0.71, "green": 0.84, "blue": 0.66}
-    """Цвет для объявлений, подходящих под критерии, но снятых с публикации (#B5D6A8)"""
+    sheet_deactivated_color: dict = {"red": 217 / 255, "green": 217 / 255, "blue": 217 / 255}
+    """Сероватый цвет для снятых с публикации объявлений (#D9D9D9)"""
+
+    # Имена вкладок Google Sheets (как в документе, статичные)
+    sheet_tab_avans: str = "Аванс"
+    sheet_tab_avans_sold: str = "Аванс_Продано"
+    sheet_tab_sold: str = "Продано"
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(
@@ -119,22 +143,51 @@ class Settings(BaseSettings):
                 "Получите ключ на https://firecrawl.dev"
             )
 
-        self._push_decodo_to_environ()
+        self._pop_obsolete_scraper_api_env()
+
+        if self._should_use_proxy_file_for_search():
+            logger.info("Поисковые страницы Cian: прокси из %s", self.proxies_file)
 
         logger.info(f"Settings loaded from {self.model_config['env_file']}")
         logger.debug(f"Cookie Manager URL: {self.cookie_manager_url}")
 
-    def _push_decodo_to_environ(self) -> None:
-        """Pydantic Settings загружает .env в поля, но не в os.environ.
-        CianParser.decodo_scraper читает os.environ — синхронизируем."""
-        _pairs = [
-            ("DECODO_AUTH_TOKEN", (self.decodo_auth_token or "").strip()),
-            ("DECODO_SCRAPER_URL", (self.decodo_scraper_url or "").strip()),
-            ("DECODO_MAX_RETRIES", str(self.decodo_max_retries)),
-        ]
-        for key, val in _pairs:
-            if val and not os.environ.get(key, "").strip():
-                os.environ[key] = val
+    def _resolve_proxies_file_path(self) -> str:
+        p = (self.proxies_file or "").strip()
+        if not p:
+            return ""
+        if os.path.isabs(p):
+            return p
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        return os.path.normpath(os.path.join(root, p))
+
+    def _should_use_proxy_file_for_search(self) -> bool:
+        if not self.use_proxies_for_search:
+            return False
+        path = self._resolve_proxies_file_path()
+        if not path or not os.path.isfile(path):
+            return False
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    if s and not s.startswith("#"):
+                        return True
+        except OSError:
+            return False
+        return False
+
+    def _pop_obsolete_scraper_api_env(self) -> None:
+        """Убираем из окружения ключи стороннего Scraper API (если остались в .env)."""
+        for key in ("DECODO_AUTH_TOKEN", "DECODO_SCRAPER_URL", "DECODO_MAX_RETRIES"):
+            os.environ.pop(key, None)
+
+    def proxy_urls_for_search(self) -> list[str]:
+        """Список URL прокси для cianparser (пусто — прямой HTTP GET)."""
+        if not self.use_proxies_for_search:
+            return []
+        from services.parser_cian.proxy_loader import load_proxy_urls
+
+        return load_proxy_urls(self._resolve_proxies_file_path())
 
 
 # Глобальный экземпляр конфигурации

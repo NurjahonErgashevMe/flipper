@@ -24,10 +24,29 @@ logger = logging.getLogger(__name__)
 def main():
     """Run category counter parser."""
     load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
+
+    for key in ("DECODO_AUTH_TOKEN", "DECODO_SCRAPER_URL", "DECODO_MAX_RETRIES"):
+        os.environ.pop(key, None)
+
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    rel = (os.environ.get("CIAN_PROXIES_FILE") or "data/proxies.txt").strip()
+    proxy_path = rel if os.path.isabs(rel) else os.path.normpath(os.path.join(root, rel))
+
+    from services.parser_cian.proxy_loader import load_proxy_urls
+
+    proxy_urls = load_proxy_urls(proxy_path) if os.path.isfile(proxy_path) else []
+    http_single = (os.environ.get("HTTP_PROXY") or "").strip() or None
+
     logger.info(
-        "Starting category counter parser (Decodo при наличии DECODO_AUTH_TOKEN; иначе direct HTTP)..."
+        "Starting category counter (file %s → %s прокси; HTTP_PROXY=%s)",
+        proxy_path,
+        len(proxy_urls),
+        "да" if http_single else "нет",
     )
-    parser = CategoryCounterParser(http_proxy=None)
+    parser = CategoryCounterParser(
+        http_proxy=http_single if not proxy_urls else None,
+        proxy_urls=proxy_urls if proxy_urls else None,
+    )
     
     # Parse all categories
     logger.info("Parsing all categories...")
@@ -82,7 +101,7 @@ def write_to_sheets(sheets_manager: SheetsManager, results: list) -> bool:
             results_dict.get("Первичка Москва", 0),  # C
             results_dict.get("Первичка МО", 0),      # D
             results_dict.get("Вторичка МО", 0),      # E
-            f"=SUM(B{{}},C{{}},D{{}},E{{}})",        # F: Sum formula (will be formatted below)
+            "=SUM(B{},C{},D{},E{})",  # F: placeholder; ниже подставляется номер строки
             EQUILIBRIUM_VALUE                         # G: Точка равновесия
         ]
         

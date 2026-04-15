@@ -67,8 +67,8 @@ services:
     container_name: parser_cian
     env_file:
       - .env
-    # Decodo Scraper API: DECODO_AUTH_TOKEN (Basic) в .env — списки в CianParser
-    # HTML_TO_MARKDOWN_URL=http://html_to_markdown:8080 — для fetch_html_and_markdown в cianparser
+    # Списки Cian: прокси из data/proxies.txt (USE_PROXIES_FOR_SEARCH / CIAN_PROXIES_FILE в .env)
+    # HTML_TO_MARKDOWN_URL=http://html_to_markdown:8080 — опционально для cianparser
     #
     # Firecrawl: имя flippercrawl-api-1 из другого compose часто НЕ резолвится в DNS → Errno -2.
     # По умолчанию — хост с опубликованным портом 3002 (как у test_parser с localhost).

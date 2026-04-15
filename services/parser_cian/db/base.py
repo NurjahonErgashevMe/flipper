@@ -35,6 +35,7 @@ class CianFilter(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     url = Column(String, unique=True, nullable=False)
+    meta = Column(JSON, nullable=True)
     
     active_ads = relationship("CianActiveAd", back_populates="filter")
 
@@ -44,7 +45,7 @@ class CianActiveAd(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     url = Column(String, unique=True, nullable=False)
     filter_id = Column(Integer, ForeignKey("cian_filters.id"), nullable=True)
-    source = Column(String, nullable=False, default="regular")
+    source = Column(String, nullable=False, default="offers")
     parsed_data = Column(JSON, nullable=True)
     is_parsed = Column(Boolean, default=False)
     last_updated = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
@@ -69,16 +70,41 @@ AsyncSessionLocal = None
 def _migrate_cian_active_ads_source_column(sync_conn) -> None:
     """
     Старые БД созданы до поля source — create_all не добавляет колонки.
-    Добавляем source TEXT NOT NULL DEFAULT 'regular' при отсутствии.
+    Добавляем source TEXT NOT NULL DEFAULT 'offers' при отсутствии.
     """
     r = sync_conn.execute(text("PRAGMA table_info(cian_active_ads)"))
     names = {row[1] for row in r.fetchall()}
     if names and "source" not in names:
         sync_conn.execute(
             text(
-                "ALTER TABLE cian_active_ads ADD COLUMN source TEXT NOT NULL DEFAULT 'regular'"
+                "ALTER TABLE cian_active_ads ADD COLUMN source TEXT NOT NULL DEFAULT 'offers'"
             )
         )
+
+
+def _migrate_cian_active_ads_regular_to_offers(sync_conn) -> None:
+    """Переименование режима: regular -> offers (для совместимости старых БД)."""
+    try:
+        sync_conn.execute(
+            text(
+                "UPDATE cian_active_ads SET source = 'offers' "
+                "WHERE source = 'regular'"
+            )
+        )
+    except Exception:
+        # не критично: если таблицы/колонки ещё нет или другая ошибка
+        pass
+
+
+def _migrate_cian_filters_meta_column(sync_conn) -> None:
+    """
+    Старые БД созданы до поля meta в cian_filters — create_all не добавляет колонки.
+    Добавляем meta JSON при отсутствии.
+    """
+    r = sync_conn.execute(text("PRAGMA table_info(cian_filters)"))
+    names = {row[1] for row in r.fetchall()}
+    if names and "meta" not in names:
+        sync_conn.execute(text("ALTER TABLE cian_filters ADD COLUMN meta JSON"))
 
 
 def init_engine(db_path: str = "data/parser_cian.db"):
@@ -127,3 +153,5 @@ async def init_db(db_path: str = "data/parser_cian.db"):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_migrate_cian_active_ads_source_column)
+        await conn.run_sync(_migrate_cian_active_ads_regular_to_offers)
+        await conn.run_sync(_migrate_cian_filters_meta_column)

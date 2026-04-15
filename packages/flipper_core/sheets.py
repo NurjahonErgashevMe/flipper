@@ -21,6 +21,16 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _SHEETS_URL_COLUMN_MAX_ROWS = 5000
 
 
+def _a1_range(tab_name: str, cell_range: str) -> str:
+    """
+    Имя листа в A1-нотации для Sheets API: в одинарных кавычках, ' внутри — удвоение.
+    Без этого часто 400 «Unable to parse range» для листов с кириллицей, пробелами,
+    именами вроде «Аванс_Продано» или при невидимых символах в названии.
+    """
+    name = str(tab_name).strip().replace("'", "''")
+    return f"'{name}'!{cell_range}"
+
+
 def _extract_url_from_hyperlink_formula(formula: str) -> Optional[str]:
     """
     Достаёт первый аргумент из =HYPERLINK("url", "подпись") или с «;» (локаль Sheets).
@@ -105,6 +115,34 @@ def _url_from_grid_cell(cell: Optional[Dict[str, Any]]) -> Optional[str]:
         if t.startswith("http"):
             return t
     return None
+
+
+def _display_from_grid_cell(cell: Optional[Dict[str, Any]]) -> str:
+    """Отображаемое значение ячейки (как видно в таблице)."""
+    if not cell:
+        return ""
+    disp = cell.get("formattedValue")
+    if disp is not None:
+        return str(disp).strip()
+    ue = cell.get("userEnteredValue") or {}
+    for key in ("stringValue", "numberValue", "boolValue", "formulaValue"):
+        if key in ue and ue.get(key) is not None:
+            return str(ue.get(key)).strip()
+    return ""
+
+
+def _trim_trailing_empty(values: List[Any]) -> List[Any]:
+    out = list(values or [])
+    while out:
+        v = out[-1]
+        if v is None:
+            out.pop()
+            continue
+        if str(v).strip() == "":
+            out.pop()
+            continue
+        break
+    return out
 
 
 class SheetsManager:
@@ -218,38 +256,100 @@ class SheetsManager:
         id_column_index: int,
         offers_bg_color: Optional[dict],
         signals_match: bool,
-        signals_bg_color: dict,
+        signals_bg_color: Optional[dict],
+        offers_match: bool = True,
+        deactivated: bool = False,
     ) -> bool:
-        """Один batchGet для Offers_Parser + Signals_Parser, затем обновления (меньше read quota)."""
+        """Один batchGet для Offers_Parser + Signals_Parser, затем обновления (меньше read quota).
+
+        offers_match=False — строка удаляется из Offers_Parser (критерий 200+ просмотров и т.п.).
+
+        deactivated=True — если строка уже существует, обновляет только цвет (значения ячеек не трогает),
+        чтобы не затирать критичные поля при снятии объявления с публикации.
+        """
         by_tab = self.batch_get_value_ranges(
-            ["Offers_Parser!A:Z", "Signals_Parser!A:Z"]
+            [_a1_range("Offers_Parser", "A:Z"), _a1_range("Signals_Parser", "A:Z")]
         )
         offers_vals = by_tab.get("Offers_Parser") or []
         signals_vals = by_tab.get("Signals_Parser") or []
-        ok_offers = self.find_and_update_row(
-            "Offers_Parser",
-            row,
-            id_value=cian_id,
-            id_column_index=id_column_index,
-            bg_color=offers_bg_color,
-            existing_values=offers_vals,
-        )
-        if signals_match:
-            self.find_and_update_row(
-                "Signals_Parser",
+
+        def _row_exists(values: List[List[Any]]) -> bool:
+            if not values:
+                return False
+            for i, existing_row in enumerate(values):
+                if i == 0:
+                    continue
+                if (
+                    len(existing_row) > id_column_index
+                    and str(existing_row[id_column_index]) == str(cian_id)
+                ):
+                    return True
+            return False
+
+        signals_exists = _row_exists(signals_vals)
+        if offers_match:
+            ok_offers = self.find_and_update_row(
+                "Offers_Parser",
                 row,
                 id_value=cian_id,
                 id_column_index=id_column_index,
-                bg_color=signals_bg_color,
-                existing_values=signals_vals,
+                bg_color=offers_bg_color,
+                existing_values=offers_vals,
+                update_values=(not deactivated),
             )
         else:
-            self.delete_row_by_id(
-                "Signals_Parser",
+            ok_offers = self.delete_row_by_id(
+                "Offers_Parser",
                 id_value=cian_id,
                 id_column_index=id_column_index,
-                existing_values=signals_vals,
+                existing_values=offers_vals,
             )
+        if deactivated:
+            # При снятии объявления: если строка уже есть — меняем только цвет, значения не трогаем.
+            # Если строки нет — добавляем только если signals_match=True (то есть объявление должно быть в Signals_Parser).
+            if signals_exists:
+                self.find_and_update_row(
+                    "Signals_Parser",
+                    row,
+                    id_value=cian_id,
+                    id_column_index=id_column_index,
+                    bg_color=signals_bg_color,
+                    existing_values=signals_vals,
+                    update_values=False,
+                )
+            elif signals_match:
+                self.find_and_update_row(
+                    "Signals_Parser",
+                    row,
+                    id_value=cian_id,
+                    id_column_index=id_column_index,
+                    bg_color=signals_bg_color,
+                    existing_values=signals_vals,
+                    update_values=True,
+                )
+        else:
+            if signals_match:
+                self.find_and_update_row(
+                    "Signals_Parser",
+                    row,
+                    id_value=cian_id,
+                    id_column_index=id_column_index,
+                    bg_color=signals_bg_color,
+                    existing_values=signals_vals,
+                    update_values=True,
+                )
+            elif signals_exists:
+                # Уже в Signals: продолжаем мониторинг — обновляем строку данными парсинга,
+                # даже если критерии «сигнала» сейчас не выполняются (не удаляем из вкладки).
+                self.find_and_update_row(
+                    "Signals_Parser",
+                    row,
+                    id_value=cian_id,
+                    id_column_index=id_column_index,
+                    bg_color=signals_bg_color,
+                    existing_values=signals_vals,
+                    update_values=True,
+                )
         return ok_offers
 
     def get_urls(self, tab_name: str = "FILTERS", column: str = "A") -> List[str]:
@@ -269,7 +369,7 @@ class SheetsManager:
         """
         try:
             self._throttle_read()
-            range_a1 = f"{tab_name}!{column}1:{column}{_SHEETS_URL_COLUMN_MAX_ROWS}"
+            range_a1 = _a1_range(tab_name, f"{column}1:{column}{_SHEETS_URL_COLUMN_MAX_ROWS}")
 
             def _get_grid():
                 # Вся CellData по колонке: hyperlink, formula, rich-text links (textFormatRuns)
@@ -305,6 +405,88 @@ class SheetsManager:
 
         except Exception as e:
             logger.error(f"Failed to read URLs from Google Sheets: {e}")
+            raise
+
+    def get_filters_table(self, tab_name: str = "FILTERS", max_columns: str = "Z") -> Dict[str, Any]:
+        """
+        Читает вкладку FILTERS целиком (A..max_columns) с учётом hyperlinks/формул.
+
+        Возвращает таблицу:
+        - headers: значения первой строки (A1..)
+        - rows: список строк-фильтров (без заголовка), каждая:
+            {
+              "row_index": int (1-based),
+              "url": str (реальный URL из колонки A),
+              "a_display": str (отображаемое значение в A),
+              "cells": List[str] (отображаемые значения A..)
+            }
+        """
+        try:
+            self._throttle_read()
+            range_a1 = _a1_range(tab_name, f"A1:{max_columns}{_SHEETS_URL_COLUMN_MAX_ROWS}")
+
+            def _get_grid():
+                return (
+                    self.sheet.get(
+                        spreadsheetId=self.spreadsheet_id,
+                        ranges=[range_a1],
+                        includeGridData=True,
+                        fields="sheets(data(rowData(values)))",
+                    ).execute()
+                )
+
+            grid = self._execute_with_retry(_get_grid)
+            headers: List[str] = []
+            rows_out: List[Dict[str, Any]] = []
+
+            sheet_items = grid.get("sheets") or []
+            for sheet in sheet_items:
+                for data in sheet.get("data") or []:
+                    for idx, row in enumerate(data.get("rowData") or []):
+                        row_index = idx + 1  # 1-based sheet row
+                        cells = row.get("values") or []
+                        if not cells:
+                            continue
+
+                        cell_a = cells[0] if len(cells) >= 1 else None
+                        a_display = _display_from_grid_cell(cell_a)
+                        url = _url_from_grid_cell(cell_a)
+
+                        display_cells = [_display_from_grid_cell(c) for c in cells]
+                        display_cells = _trim_trailing_empty(display_cells)
+
+                        if row_index == 1:
+                            # Заголовок опционален. Считаем 1-ю строку заголовком только если в A нет URL.
+                            a0 = (a_display or (display_cells[0] if display_cells else "") or "").strip().lower()
+                            if (not url) and a0 in ("url", "urls", "ссылка", "ссылки", "filters", "фильтры"):
+                                headers = [str(v) for v in display_cells]
+                                continue
+
+                        if not url:
+                            continue
+                        low = str(url).strip().lower()
+                        if low in ("url", "urls"):
+                            continue
+
+                        rows_out.append(
+                            {
+                                "row_index": row_index,
+                                "url": str(url).strip(),
+                                "a_display": a_display,
+                                "cells": [str(v) for v in display_cells],
+                            }
+                        )
+
+            logger.info(
+                "Read %s FILTERS rows from %s (A..%s, gridData)",
+                len(rows_out),
+                tab_name,
+                max_columns,
+            )
+            return {"headers": headers, "rows": rows_out}
+
+        except Exception as e:
+            logger.error("Failed to read FILTERS table from Google Sheets: %s", e)
             raise
     def write_row(
         self,
@@ -395,7 +577,7 @@ class SheetsManager:
                                 self.sheet.values()
                                 .update(
                                     spreadsheetId=self.spreadsheet_id,
-                                    range=f"{tab_name}!A2",
+                                    range=_a1_range(tab_name, "A2"),
                                     valueInputOption="USER_ENTERED",
                                     body=body,
                                 )
@@ -428,7 +610,7 @@ class SheetsManager:
                             self.sheet.values()
                             .append(
                                 spreadsheetId=self.spreadsheet_id,
-                                range=f"{tab_name}!A:Z",
+                                range=_a1_range(tab_name, "A:Z"),
                                 valueInputOption="USER_ENTERED",
                                 insertDataOption="INSERT_ROWS",
                                 body=body,
@@ -460,6 +642,7 @@ class SheetsManager:
         id_column_index: int = 0,
         bg_color: dict = None,
         existing_values: Optional[List[List[Any]]] = None,
+        update_values: bool = True,
     ) -> bool:
         """Ищет строку по ID в указанной колонке и обновляет её.
         Если не находит - вставляет новую наверх.
@@ -471,6 +654,7 @@ class SheetsManager:
             id_column_index: Индекс колонки с ID (0 = A)
             bg_color: Цвет фона для обновления
             existing_values: Уже загруженные строки листа (из batchGet) — без лишнего read
+            update_values: Если False и строка уже существует — обновляет только цвет (значения не перезаписывает)
 
         Returns:
             True если успешно
@@ -486,7 +670,7 @@ class SheetsManager:
                         self.sheet.values()
                         .get(
                             spreadsheetId=self.spreadsheet_id,
-                            range=f"{tab_name}!A:Z",
+                            range=_a1_range(tab_name, "A:Z"),
                         )
                         .execute()
                     )
@@ -505,24 +689,31 @@ class SheetsManager:
             
             if row_index != -1:
                 # 2. Нашли! Обновляем существующую
-                logger.info(f"Found existing row for {id_value} at index {row_index} in {tab_name}. Updating...")
-                
-                # Обновляем значения
-                body = {"values": [row]}
-
-                def _put_vals():
-                    return (
-                        self.sheet.values()
-                        .update(
-                            spreadsheetId=self.spreadsheet_id,
-                            range=f"{tab_name}!A{row_index}",
-                            valueInputOption="USER_ENTERED",
-                            body=body,
-                        )
-                        .execute()
+                if update_values:
+                    logger.info(
+                        f"Found existing row for {id_value} at index {row_index} in {tab_name}. Updating..."
                     )
 
-                self._execute_with_retry(_put_vals)
+                    # Обновляем значения
+                    body = {"values": [row]}
+
+                    def _put_vals():
+                        return (
+                            self.sheet.values()
+                            .update(
+                                spreadsheetId=self.spreadsheet_id,
+                                range=_a1_range(tab_name, f"A{row_index}"),
+                                valueInputOption="USER_ENTERED",
+                                body=body,
+                            )
+                            .execute()
+                        )
+
+                    self._execute_with_retry(_put_vals)
+                else:
+                    logger.info(
+                        f"Found existing row for {id_value} at index {row_index} in {tab_name}. Formatting only..."
+                    )
 
                 # Обновляем цвет: если bg_color не задан, сбрасываем в белый
                 bg_color_dict = bg_color if bg_color else {"red": 1.0, "green": 1.0, "blue": 1.0}
@@ -587,7 +778,7 @@ class SheetsManager:
                         self.sheet.values()
                         .get(
                             spreadsheetId=self.spreadsheet_id,
-                            range=f"{tab_name}!A:Z",
+                            range=_a1_range(tab_name, "A:Z"),
                         )
                         .execute()
                     )
@@ -694,7 +885,7 @@ class SheetsManager:
                     self.sheet.values()
                     .append(
                         spreadsheetId=self.spreadsheet_id,
-                        range=f"{tab_name}!A:Z",
+                        range=_a1_range(tab_name, "A:Z"),
                         valueInputOption="USER_ENTERED",
                         insertDataOption="INSERT_ROWS",
                         body=body,

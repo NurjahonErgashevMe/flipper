@@ -47,16 +47,34 @@ def _sanitize_building_type(raw: Any) -> str:
 
 def _parse_price_history_date_str(d_str: Any):
     """Дата для сортировки: datetime.date или None."""
+    if d_str is None:
+        return None
+    if isinstance(d_str, (int, float)):
+        return None
     if not isinstance(d_str, str):
         return None
-    d_str = d_str.strip()
+    d_str = d_str.strip().strip(".")
     if not d_str:
         return None
+    # ISO внутри длинной строки
+    m_iso = re.search(r"(20\d{2})-(\d{2})-(\d{2})", d_str)
+    if m_iso:
+        try:
+            return datetime(
+                int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
+            ).date()
+        except Exception:
+            pass
     try:
         return datetime.strptime(d_str, "%Y-%m-%d").date()
     except Exception:
         pass
     try:
+        return datetime.strptime(d_str, "%d.%m.%Y").date()
+    except Exception:
+        pass
+    try:
+        # «8 апр 2026», «8 апр. 2026 г.», «30 марта 2026»
         months = {
             "янв": 1,
             "фев": 2,
@@ -71,13 +89,29 @@ def _parse_price_history_date_str(d_str: Any):
             "окт": 10,
             "ноя": 11,
             "дек": 12,
+            # длинные префиксы (января, марта, апреля…)
+            "январ": 1,
+            "феврал": 2,
+            "март": 3,
+            "апрел": 4,
+            "август": 8,
+            "сентябр": 9,
+            "октябр": 10,
+            "ноябр": 11,
+            "декабр": 12,
         }
-        parts = d_str.split()
+        parts = d_str.replace(" г.", "").replace("г.", "").split()
         if len(parts) >= 3:
-            day = int(parts[0])
-            mon_raw = parts[1].lower()[:3]
-            year = int(parts[2])
+            day = int(re.sub(r"\D", "", parts[0]))
+            mon_word = re.sub(r"[^а-яёa-z]", "", parts[1].lower())
+            mon_raw = mon_word[:3] if len(mon_word) >= 3 else mon_word
+            year = int(re.sub(r"\D", "", parts[2]))
             mon = months.get(mon_raw)
+            if mon is None and len(mon_word) >= 5:
+                for k, v in months.items():
+                    if len(k) >= 4 and mon_word.startswith(k[:4]):
+                        mon = v
+                        break
             if mon:
                 return datetime(year, mon, day).date()
     except Exception:
@@ -91,6 +125,31 @@ def _is_cian_markdown_ui_line(line: str) -> bool:
     if not t:
         return False
     low = t.lower()
+    # Блок «О доме», ипотечные/агентские виджеты — не описание продавца
+    if low in (
+        "строительная серия",
+        "количество лифтов",
+        "тип перекрытий",
+        "о подъезде",
+        "спросите умного помощника",
+        "получите экспертное мнение о жилье",
+        "спросить",
+        "ипотечный калькулятор",
+        "стоимость недвижимости",
+        "ит-ипотека",
+        "срок кредита",
+        "загружаем предложения от застройщика и банков",
+        "зимой будет тепло",
+        "показать телефон",
+        "следить за изменением цены",
+        "один запрос в 9 банков",
+        "планировка этой квартиры",
+    ):
+        return True
+    if "риелтор" in low and "суперагент" in low:
+        return True
+    if re.match(r"^ставки\s+от\s+\d", low):
+        return True
     if low in ("на карте", "сравнить", "пожаловаться"):
         return True
     if low.startswith("скачать в"):
@@ -127,7 +186,88 @@ def _is_cian_markdown_ui_line(line: str) -> bool:
         return True
     if re.match(r"^Год\s+постройки\s*\d", t, re.I):
         return True
+    # «Тип дома» как отдельная метка в блоке О доме (значение на следующей строке)
+    if low == "тип дома":
+        return True
     return False
+
+
+def _description_looks_like_sidebar_ui(text: str) -> bool:
+    """Типичный мусор: блок О доме + ипотека/агент, не связный текст продавца."""
+    if not text or len(text.strip()) < 40:
+        return False
+    low = text.lower()
+    markers = (
+        "строительная серия",
+        "количество лифтов",
+        "спросите умного помощника",
+        "ипотечный калькулятор",
+        "суперагент",
+        "загружаем предложения от застройщика",
+        "один запрос в 9 банков",
+        "ставки от ",
+    )
+    hits = sum(1 for m in markers if m in low)
+    if hits >= 2:
+        return True
+    if text.lstrip().lower().startswith("строительная серия"):
+        return True
+    if "ипотечный калькулятор" in low and "показать телефон" in low:
+        return True
+    return False
+
+
+def _extract_seller_text_before_sidebar(s: str) -> str:
+    """
+    Берёт текст до типичного начала блока «О доме» / виджетов (если они идут после описания).
+    """
+    # Начало блока дома/сайдбара в markdown
+    stop = re.search(
+        r"(?:^|\n)\s*(?:Строительная\s+серия|Количество\s+лифтов|"
+        r"Спросите\s+умного\s+помощника|Ипотечный\s+калькулятор)\s*(?:\n|$)",
+        s,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if stop:
+        head = s[: stop.start()].strip()
+        if len(head) >= 12:
+            return head
+    return ""
+
+
+def _pick_best_description_paragraph(s: str) -> str:
+    """
+    Если в ответе ИИ смешаны короткое описание и длинный UI — выбираем параграф без маркеров сайдбара.
+    """
+    parts = re.split(r"\n\s*\n+", s)
+    best = ""
+    best_score = -1
+    bad_sub = (
+        "строительная серия",
+        "количество лифтов",
+        "ипотечный калькулятор",
+        "спросите умного",
+        "суперагент",
+        "загружаем предложения",
+        "один запрос в 9 банков",
+    )
+    for p in parts:
+        p = p.strip()
+        if len(p) < 12:
+            continue
+        low = p.lower()
+        if any(b in low for b in bad_sub):
+            continue
+        if _description_looks_like_sidebar_ui(p):
+            continue
+        # Короткие связные фразы продавца — предпочтительнее длинного шума
+        score = min(len(p), 800) - 50 * sum(low.count(b) for b in bad_sub)
+        if "\n" in p and p.count("\n") > 8:
+            score -= 200
+        if score > best_score:
+            best_score = score
+            best = p
+    return best
 
 
 def _clean_cian_description(raw: str) -> str:
@@ -137,16 +277,65 @@ def _clean_cian_description(raw: str) -> str:
     """
     if not raw or not str(raw).strip():
         return ""
-    s = str(raw).replace("\r\n", "\n").replace("\r", "\n").strip()
+    original = str(raw).replace("\r\n", "\n").replace("\r", "\n").strip()
+    s = original
 
-    # 1) После последнего «Год постройки YYYY» — там начинается связное описание
-    year_m = list(re.finditer(r"Год\s+постройки\s*\d{4}", s, flags=re.IGNORECASE))
-    if year_m:
-        tail = s[year_m[-1].end() :].lstrip()
-        if len(tail) >= 20:
-            s = tail
+    # Иногда Циан пишет «за объект внесли аванс/задаток» отдельной строкой
+    # в верхней части карточки (до параметров/«Год постройки»). Сохраняем эту строку,
+    # иначе она может пропасть при обрезке description.
+    avans_hint = ""
+    for pat in (
+        r"За\s+объект\s+уже\s+внесли\s+(?:аванс|задаток)",
+        r"За\s+квартир[ау]\s+внес[её]н\s+(?:аванс|задаток)",
+        r"Внес[её]н\s+(?:аванс|задаток)",
+        r"Принят\s+задаток",
+        r"Получен\s+аванс",
+        r"Обеспечительн\w*\s+плат[её]ж\s+(?:внес[её]н|получен)",
+        r"Квартир[ау]\s+забронирован[ао]",
+        r"Объект\s+забронирован",
+    ):
+        m = re.search(pat, s, flags=re.IGNORECASE)
+        if not m:
+            continue
+        ls = s.rfind("\n", 0, m.start())
+        ls = 0 if ls < 0 else ls + 1
+        le = s.find("\n", m.end())
+        le = len(s) if le < 0 else le
+        snippet = s[ls:le].strip().strip("-•* \t")
+        snippet = re.sub(r"\s+", " ", snippet).strip()
+        if snippet:
+            avans_hint = snippet
+            break
+
+    # 1) Текст продавца часто идёт ДО блока «Строительная серия» / виджетов — сначала отрезаем сайдбар
+    head_before_sidebar = _extract_seller_text_before_sidebar(s)
+    if head_before_sidebar and not _description_looks_like_sidebar_ui(head_before_sidebar):
+        s = head_before_sidebar
+
+    # 2) После «Год постройки YYYY» иногда идёт короткое описание, а после него — блок «О доме».
+    #    Берём фрагмент после ПЕРВОГО «Год постройки», обрезая по маркеру сайдбара; не берём «хвост» после
+    #    последнего вхождения года — там часто только мусор из «О доме».
+    year_first = re.search(r"Год\s+постройки\s*\d{4}", s, flags=re.IGNORECASE)
+    if year_first:
+        chunk = s[year_first.end() :].lstrip()
+        stop_sb = re.search(
+            r"(?:^|\n)\s*(?:Строительная\s+серия|Количество\s+лифтов|"
+            r"Спросите\s+умного\s+помощника|Ипотечный\s+калькулятор)\b",
+            chunk,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        if stop_sb:
+            chunk = chunk[: stop_sb.start()].strip()
+        if 20 <= len(chunk) <= 15000 and not _description_looks_like_sidebar_ui(chunk):
+            s = chunk
+        else:
+            year_last = list(re.finditer(r"Год\s+постройки\s*\d{4}", s, flags=re.IGNORECASE))
+            if year_last:
+                tail = s[year_last[-1].end() :].lstrip()
+                if len(tail) >= 20 and not _description_looks_like_sidebar_ui(tail):
+                    s = tail
     else:
-        # 2) Якоря начала продающего текста (если года в тексте нет)
+        # 3) Якоря начала продающего текста (если года в тексте нет)
         for pat in (
             r"Код\s+объекта\s*:\s*\d+",
             r"За\s+объект\s+уже\s+внесли",
@@ -157,6 +346,16 @@ def _clean_cian_description(raw: str) -> str:
             if m and len(s[m.start() :].strip()) >= 30:
                 s = s[m.start() :].strip()
                 break
+
+    if _description_looks_like_sidebar_ui(s):
+        s = original
+        alt = _pick_best_description_paragraph(original)
+        if alt:
+            s = alt
+        else:
+            head2 = _extract_seller_text_before_sidebar(original)
+            if head2:
+                s = head2
 
     lines_out: list[str] = []
     for line in s.split("\n"):
@@ -171,6 +370,9 @@ def _clean_cian_description(raw: str) -> str:
 
     out = "\n".join(lines_out).strip()
     out = re.sub(r"\n{3,}", "\n\n", out)
+
+    if avans_hint and avans_hint.lower() not in out.lower():
+        out = f"{avans_hint}\n\n{out}" if out else avans_hint
     return out
 
 
@@ -182,11 +384,19 @@ SYSTEM_PROMPT = (
     "Если строки 'Тип дома' на странице нет — building_type = null. "
     "НИКОГДА не подставляй сюда 'Строительную серию' (Индивидуальный проект, II-49, П-44Т и т.п.). "
     "renovation — тип ремонта из 'О квартире'. district — район, okrug — ЦАО, ЮВАО и т.д. "
-    "description — только связный текст описания из блока под карточкой: без хлебных крошек, "
-    "без списков метро (* … мин), без «На карте», «Скачать», «Пожаловаться», без дубля строк "
-    "«Общая площадь / Этаж / Год постройки» (эти поля уже в других полях схемы). "
+    "description — только связный текст описания продавца (может быть коротким, 1–2 предложения). "
+    "НИКОГДА не копируй блок «О доме» (Строительная серия, П-44, лифты, перекрытия), "
+    "виджеты «Ипотечный калькулятор», «Спросите умного помощника», карточки риелторов/«Суперагент», "
+    "«Показать телефон», хлебные крошки, списки метро (* … мин), «На карте», «Скачать», «Пожаловаться», "
+    "дубли строк «Общая площадь / Этаж / Год постройки» (эти поля уже в других полях схемы). "
     "Просмотры: «X просмотров, Y за сегодня» — X→total_views, Y→unique_views. "
     "is_active: true, если карточка доступна. "
+    "has_avans_deposit: true если на странице есть признаки, что за объект внесён "
+    "аванс/задаток/обеспечительный платёж (покупатель уже забронировал квартиру). "
+    "Это может быть не только в описании/заголовке продавца, но и в бейдже/уведомлении "
+    "в верхней части карточки (например: «За объект уже внесли аванс»). "
+    "Просто наличие слова «аванс» в описании НЕ достаточно — нужен смысловой контекст "
+    "подтверждения внесения платежа. false если таких сведений нет. "
     "price_history: строки таблицы 'История цены' в хронологическом порядке (сначала старые события), "
     "для каждой строки: date в формате YYYY-MM-DD и price; сумму изменения и тип пересчитает бэкенд."
 )
@@ -647,6 +857,18 @@ class AdParser:
                     "type": "boolean",
                     "description": "Активно ли объявление. False если 'снято с публикации', 'снято с продажи'.",
                 },
+                "has_avans_deposit": {
+                    "type": "boolean",
+                    "description": (
+                        "True если на странице есть признак, что за данный объект внесён аванс "
+                        "(задаток, обеспечительный платёж). Важно: это может быть отдельный бейдж/"
+                        "уведомление в верхней части карточки (например: «За объект уже внесли аванс»), "
+                        "а не только текст описания продавца. "
+                        "Примеры: «внесён аванс», «принят задаток», «за квартиру внесли аванс», "
+                        "«объект снят с продажи — внесён задаток», «получен аванс». "
+                        "Если таких упоминаний нет — false."
+                    ),
+                },
                 "price_history": {
                     "type": "array",
                     "description": "История изменения цены (если есть раздел 'История цены')",
@@ -935,28 +1157,31 @@ class AdParser:
                 )
 
             if rows:
-                # Циан показывает историю цены "сверху новые".
-                # Firecrawl/LLM часто возвращают строки ровно в этом порядке.
-                # Нам нужна строгая хронология "сначала старые", поэтому:
-                # - сортируем по дате ASC
-                # - внутри одной даты сохраняем порядок, соответствующий "старые→новые"
-                #   (если исходный список был "новые→старые", то внутри даты разворачиваем).
+                # Циан: сверху новее. Нужен порядок «сначала старые по времени», затем
+                # change_amount = price[i] − price[i−1] (снижение → отрицательная дельта).
                 dated_in_input = [r for r in rows if r.get("date") is not None]
-                input_is_desc = False
-                if len(dated_in_input) >= 2:
+
+                if len(dated_in_input) < 2:
+                    # Нет двух валидных дат — сортировка по дате ненадёжна; порядок ИИ как на сайте (сверху новее).
+                    rows.sort(key=lambda e: -e["orig_index"])
+                else:
                     first_date = dated_in_input[0]["date"]
                     last_date = dated_in_input[-1]["date"]
-                    input_is_desc = bool(first_date and last_date and first_date > last_date)
+                    input_is_desc = bool(
+                        first_date and last_date and first_date > last_date
+                    )
+                    # Несколько строк в один календарный день — сверху новее (как в модалке Циан)
+                    unique_dates = {r["date"] for r in dated_in_input}
+                    if len(unique_dates) == 1:
+                        input_is_desc = True
 
-                def _sort_key(e):
-                    # None-date всегда в конце, порядок в пределах None сохраняем как есть
-                    date_rank = 1 if e["date"] is None else 0
-                    date_key = e["date"] or datetime.min.date()
-                    # внутри одной даты: если вход был desc, то старые элементы ближе к концу input
-                    intra = -e["orig_index"] if input_is_desc else e["orig_index"]
-                    return (date_rank, date_key, intra)
+                    def _sort_key(e):
+                        date_rank = 1 if e["date"] is None else 0
+                        date_key = e["date"] or datetime.min.date()
+                        intra = -e["orig_index"] if input_is_desc else e["orig_index"]
+                        return (date_rank, date_key, intra)
 
-                rows.sort(key=_sort_key)
+                    rows.sort(key=_sort_key)
 
                 out = []
                 for i, item in enumerate(rows):
