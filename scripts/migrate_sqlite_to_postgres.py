@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import text
-from services.parser_cian.db.base import init_engine, init_db, AsyncSessionLocal
+from services.parser_cian.db import base as db_base
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("migrate")
@@ -112,9 +112,11 @@ def read_sqlite(db_path: str) -> dict:
 
 async def write_postgres(pg_url: str, data: dict) -> None:
     """Write data to PostgreSQL, creating tables first."""
-    await init_db(pg_url)
+    await db_base.init_db(pg_url)
+    if db_base.AsyncSessionLocal is None:
+        raise RuntimeError("AsyncSessionLocal is not initialized after init_db()")
 
-    async with AsyncSessionLocal() as session:
+    async with db_base.AsyncSessionLocal() as session:
         # Check if target tables already have data
         for table in ("cian_filters", "cian_active_ads", "cian_sold_ads"):
             result = await session.execute(text(f"SELECT COUNT(*) FROM {table}"))
@@ -125,7 +127,7 @@ async def write_postgres(pg_url: str, data: dict) -> None:
     # --- cian_filters ---
     filters = data.get("cian_filters", [])
     if filters:
-        async with AsyncSessionLocal() as session:
+        async with db_base.AsyncSessionLocal() as session:
             for f in filters:
                 await session.execute(text(
                     "INSERT INTO cian_filters (id, url, meta) "
@@ -146,7 +148,7 @@ async def write_postgres(pg_url: str, data: dict) -> None:
     if ads:
         chunk_size = 200
         inserted = 0
-        async with AsyncSessionLocal() as session:
+        async with db_base.AsyncSessionLocal() as session:
             for i in range(0, len(ads), chunk_size):
                 chunk = ads[i:i + chunk_size]
                 for ad in chunk:
@@ -180,7 +182,7 @@ async def write_postgres(pg_url: str, data: dict) -> None:
     # --- cian_sold_ads ---
     sold = data.get("cian_sold_ads", [])
     if sold:
-        async with AsyncSessionLocal() as session:
+        async with db_base.AsyncSessionLocal() as session:
             for s in sold:
                 await session.execute(text(
                     "INSERT INTO cian_sold_ads (id, url, parsed_data, publish_date, sold_at) "
