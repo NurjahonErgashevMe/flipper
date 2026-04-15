@@ -18,6 +18,7 @@ import json
 import logging
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -30,6 +31,21 @@ logger = logging.getLogger("migrate")
 
 DEFAULT_SQLITE = "data/parser_cian.db"
 DEFAULT_PG = "postgresql+asyncpg://flipper:flipper_secret@app_postgres:5432/flipper"
+
+
+def _parse_ts(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        # Works for 'YYYY-MM-DD HH:MM:SS' and ISO-like timestamps.
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def read_sqlite(db_path: str) -> dict:
@@ -156,8 +172,7 @@ async def write_postgres(pg_url: str, data: dict) -> None:
                         "INSERT INTO cian_active_ads "
                         "(id, url, filter_id, source, parsed_data, is_parsed, last_updated, added_at) "
                         "VALUES (:id, :url, :filter_id, :source, CAST(:parsed_data AS jsonb), :is_parsed, "
-                        "CASE WHEN :last_updated IS NOT NULL THEN CAST(:last_updated AS timestamp) ELSE CURRENT_TIMESTAMP END, "
-                        "CASE WHEN :added_at IS NOT NULL THEN CAST(:added_at AS timestamp) ELSE CURRENT_TIMESTAMP END) "
+                        ":last_updated, :added_at) "
                         "ON CONFLICT (url) DO NOTHING"
                     ), {
                         "id": ad["id"],
@@ -166,8 +181,8 @@ async def write_postgres(pg_url: str, data: dict) -> None:
                         "source": ad["source"],
                         "parsed_data": json.dumps(ad["parsed_data"]) if ad["parsed_data"] else None,
                         "is_parsed": ad["is_parsed"],
-                        "last_updated": ad["last_updated"],
-                        "added_at": ad["added_at"],
+                        "last_updated": _parse_ts(ad["last_updated"]) or datetime.now(),
+                        "added_at": _parse_ts(ad["added_at"]) or datetime.now(),
                     })
                     inserted += 1
                 await session.commit()
@@ -186,15 +201,14 @@ async def write_postgres(pg_url: str, data: dict) -> None:
             for s in sold:
                 await session.execute(text(
                     "INSERT INTO cian_sold_ads (id, url, parsed_data, publish_date, sold_at) "
-                    "VALUES (:id, :url, CAST(:parsed_data AS jsonb), :publish_date, "
-                    "CASE WHEN :sold_at IS NOT NULL THEN CAST(:sold_at AS timestamp) ELSE CURRENT_TIMESTAMP END) "
+                    "VALUES (:id, :url, CAST(:parsed_data AS jsonb), :publish_date, :sold_at) "
                     "ON CONFLICT (url) DO NOTHING"
                 ), {
                     "id": s["id"],
                     "url": s["url"],
                     "parsed_data": json.dumps(s["parsed_data"]) if s["parsed_data"] else None,
                     "publish_date": s["publish_date"],
-                    "sold_at": s["sold_at"],
+                    "sold_at": _parse_ts(s["sold_at"]) or datetime.now(),
                 })
             await session.commit()
 
