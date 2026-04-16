@@ -373,7 +373,7 @@ def build_scheduler() -> AsyncIOScheduler:
 
     scheduler.add_job(
         job_category_counter,
-        CronTrigger(hour=14, minute=45, timezone=MSK),
+        CronTrigger(hour=9, minute=00, timezone=MSK),
         id="category_counter_09",
         name="category_counter @ 12:10 MSK (TEST)",
         misfire_grace_time=3600,
@@ -382,7 +382,7 @@ def build_scheduler() -> AsyncIOScheduler:
 
     scheduler.add_job(
         job_parsing,
-        CronTrigger(hour=15, minute=30, timezone=MSK),
+        CronTrigger(hour=10, minute=00, timezone=MSK),
         id="parsing_10",
         name="parsing (avans+offers) @ 12:10 MSK (TEST)",
         misfire_grace_time=3600,
