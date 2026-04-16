@@ -336,10 +336,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["offers", "avans", "regular"],
+        choices=["offers", "avans"],
         default="offers",
         help="Режим работы: offers (фильтры из Sheets) или avans (статичная ссылка). "
-        "Alias: regular -> offers",
+        "AliasЖ offers",
     )
     link_stage = parser.add_mutually_exclusive_group()
     link_stage.add_argument(

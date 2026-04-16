@@ -7,6 +7,7 @@ Telegram-алерты.
 """
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -97,6 +98,85 @@ async def send_alert(text: str) -> None:
 # Docker Compose runner
 # ---------------------------------------------------------------------------
 
+_flipper_bind_env_done = False
+_flipper_bind_env: dict[str, str] = {}
+
+
+async def _flipper_bind_env_for_compose() -> dict[str, str]:
+    """Пути к credentials/data на **хосте Docker** для volume в compose run.
+
+    Клиент compose внутри контейнера шедулера резолвит ./credentials.json в
+    пути вида /app/... — для демона это не тот файл. Нужны абсолютные пути
+    на хосте: берём из bind-mount проекта (docker inspect) или из
+    SCHEDULER_HOST_BIND_ROOT.
+    """
+    global _flipper_bind_env_done, _flipper_bind_env
+    if _flipper_bind_env_done:
+        return _flipper_bind_env
+    _flipper_bind_env_done = True
+
+    manual = os.getenv("SCHEDULER_HOST_BIND_ROOT", "").strip()
+    if manual:
+        root = manual.replace("\\", "/").rstrip("/")
+        _flipper_bind_env = {
+            "FLIPPER_CREDENTIALS_SOURCE": f"{root}/credentials.json",
+            "FLIPPER_DATA_SOURCE": f"{root}/data",
+        }
+        logger.info("Бинды compose: SCHEDULER_HOST_BIND_ROOT=%s", root)
+        return _flipper_bind_env
+
+    compose_dir = os.path.normpath(COMPOSE_PROJECT_DIR)
+    for ref in (
+        os.getenv("HOSTNAME", "").strip(),
+        os.getenv("SCHEDULER_CONTAINER_NAME", "flipper_scheduler").strip(),
+    ):
+        if not ref:
+            continue
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            "inspect",
+            "-f",
+            "{{json .Mounts}}",
+            ref,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        if proc.returncode != 0:
+            continue
+        try:
+            mounts = json.loads(out.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            continue
+        for m in mounts:
+            dest = os.path.normpath(
+                (m.get("Destination") or "").rstrip("/") or "/"
+            )
+            if dest != compose_dir:
+                continue
+            src = (m.get("Source") or "").strip()
+            if not src:
+                continue
+            root = src.replace("\\", "/").rstrip("/")
+            _flipper_bind_env = {
+                "FLIPPER_CREDENTIALS_SOURCE": f"{root}/credentials.json",
+                "FLIPPER_DATA_SOURCE": f"{root}/data",
+            }
+            logger.info(
+                "Бинды compose: корень репозитория на хосте Docker (inspect %s)=%s",
+                ref,
+                root,
+            )
+            return _flipper_bind_env
+
+    logger.warning(
+        "Не удалось определить корень репозитория на хосте для volume. "
+        "Укажи SCHEDULER_HOST_BIND_ROOT (абсолютный путь на машине с Docker) "
+        "или смонтируй проект в %s и пересоздай контейнер шедулера.",
+        COMPOSE_PROJECT_DIR,
+    )
+    return _flipper_bind_env
+
 
 async def run_docker_compose(
     service: str,
@@ -107,19 +187,25 @@ async def run_docker_compose(
 
     Возвращает exit code. При таймауте убивает процесс и возвращает -1.
     """
+    project_name = os.getenv("COMPOSE_PROJECT_NAME", "flipper")
     cmd = [
         "docker", "compose",
+        "--project-name", project_name,
         "--project-directory", COMPOSE_PROJECT_DIR,
         "--profile", "manual",
-        "run", "--rm", service,
+        "run", "--rm", "--no-deps", service,
     ] + args
 
     logger.info("CMD: %s", " ".join(cmd))
+
+    sub_env = os.environ.copy()
+    sub_env.update(await _flipper_bind_env_for_compose())
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        env=sub_env,
     )
 
     try:
@@ -206,7 +292,7 @@ async def job_parsing() -> None:
 
         avans_ok = await _run_with_retry(
             "parser_cian",
-            ["python", "-m", "services.parser_cian.main", "--mode", "avans"],
+            ["--mode", "avans"],
             JOB_TIMEOUT_PARSER,
             f"{job_label}/avans",
         )
@@ -218,7 +304,7 @@ async def job_parsing() -> None:
 
         offers_ok = await _run_with_retry(
             "parser_cian",
-            ["python", "-m", "services.parser_cian.main", "--mode", "offers"],
+            ["--mode", "offers"],
             JOB_TIMEOUT_PARSER,
             f"{job_label}/offers",
         )
@@ -287,18 +373,18 @@ def build_scheduler() -> AsyncIOScheduler:
 
     scheduler.add_job(
         job_category_counter,
-        CronTrigger(hour=9, minute=0, timezone=MSK),
+        CronTrigger(hour=14, minute=45, timezone=MSK),
         id="category_counter_09",
-        name="category_counter @ 09:00 MSK",
+        name="category_counter @ 12:10 MSK (TEST)",
         misfire_grace_time=3600,
         max_instances=1,
     )
 
     scheduler.add_job(
         job_parsing,
-        CronTrigger(hour=10, minute=0, timezone=MSK),
+        CronTrigger(hour=15, minute=30, timezone=MSK),
         id="parsing_10",
-        name="parsing (avans+offers) @ 10:00 MSK",
+        name="parsing (avans+offers) @ 12:10 MSK (TEST)",
         misfire_grace_time=3600,
         max_instances=1,
     )
