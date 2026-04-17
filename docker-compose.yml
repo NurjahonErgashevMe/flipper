@@ -123,6 +123,7 @@ services:
       <<: *strip-proxy-env
     volumes:
       - ${FLIPPER_CREDENTIALS_SOURCE:-./credentials.json}:/app/credentials.json
+      - ${FLIPPER_DATA_SOURCE:-./data}:/app/data
     depends_on:
       html_to_markdown:
         condition: service_healthy

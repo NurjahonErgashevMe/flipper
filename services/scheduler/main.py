@@ -2,8 +2,9 @@
 services.scheduler.main — Планировщик задач парсинга CIAN.
 
 Запускает parser_cian (avans → offers) и category_counter по расписанию
-через docker compose. Отказоустойчивость: lock, таймауты, retry с backoff,
-Telegram-алерты.
+через docker compose на том же хосте (типичный деплой: Linux VPS, socket
+Docker смонтирован в контейнер). Отказоустойчивость: lock, таймауты,
+retry с backoff, Telegram-алерты.
 """
 
 import asyncio
@@ -185,6 +186,9 @@ async def run_docker_compose(
 ) -> int:
     """Запускает `docker compose --profile manual run --rm <service> <args>`.
 
+    Без --no-deps: как у ручного `docker compose run`, поднимаются/проверяются
+    depends_on (cookie_manager, postgres и т.д.) перед одноразовым контейнером.
+
     Возвращает exit code. При таймауте убивает процесс и возвращает -1.
     """
     project_name = os.getenv("COMPOSE_PROJECT_NAME", "flipper")
@@ -193,7 +197,7 @@ async def run_docker_compose(
         "--project-name", project_name,
         "--project-directory", COMPOSE_PROJECT_DIR,
         "--profile", "manual",
-        "run", "--rm", "--no-deps", service,
+        "run", "--rm", service,
     ] + args
 
     logger.info("CMD: %s", " ".join(cmd))

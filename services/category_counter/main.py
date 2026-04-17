@@ -32,7 +32,7 @@ def main():
     rel = (os.environ.get("CIAN_PROXIES_FILE") or "data/proxies.txt").strip()
     proxy_path = rel if os.path.isabs(rel) else os.path.normpath(os.path.join(root, rel))
 
-    from services.parser_cian.proxy_loader import load_proxy_urls
+    from packages.flipper_core.proxy_loader import load_proxy_urls
 
     proxy_urls = load_proxy_urls(proxy_path) if os.path.isfile(proxy_path) else []
     http_single = (os.environ.get("HTTP_PROXY") or "").strip() or None

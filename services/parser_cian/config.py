@@ -190,7 +190,7 @@ class Settings(BaseSettings):
         """Список URL прокси для cianparser (пусто — прямой HTTP GET)."""
         if not self.use_proxies_for_search:
             return []
-        from services.parser_cian.proxy_loader import load_proxy_urls
+        from packages.flipper_core.proxy_loader import load_proxy_urls
 
         return load_proxy_urls(self._resolve_proxies_file_path())
 

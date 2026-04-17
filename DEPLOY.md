@@ -259,10 +259,18 @@ Scheduler запущен в шаге 4. Расписание:
 | 18:00 | `parser_cian --mode avans`, затем `--mode offers` |
 
 Scheduler автоматически:
-- Запускает контейнеры через `docker compose run --rm`
+- Запускает контейнеры через `docker compose run --rm` (тот же сценарий, что и при ручном запуске по SSH на сервере: без `--no-deps`, чтобы сработали `depends_on` и healthcheck зависимостей)
 - Повторяет при ошибке (до 3 попыток с exponential backoff)
 - Отправляет Telegram-алерты при сбоях
 - Использует lock чтобы задачи не пересекались
+
+### 6.1 VPS (Linux-сервер): что важно для шедулера
+
+Шедулер крутится **внутри контейнера** и вызывает `docker compose` на том же хосте (через смонтированный `/var/run/docker.sock`). Compose-проект берётся из каталога, примонтированного в контейнер как `/app` (корень репозитория на диске сервера, например `/opt/flipper`).
+
+- **Пути к `credentials.json` и `data/` на хосте.** Чтобы одноразовые контейнеры `parser_cian` / `category_counter` видели те же файлы, что и при `docker compose run` с SSH, в окружение подставляются абсолютные пути на **хосте**. Обычно они определяются автоматически из bind-mount (в логах: «корень репозитория на хосте …=…»). Если путь неверный или пустой — в `.env` на сервере задайте явно: `SCHEDULER_HOST_BIND_ROOT=/opt/flipper` (замените на ваш каталог с репозиторием).
+- **Firecrawl.** Парсер ходит в Firecrawl по `FIRECRAWL_BASE_URL` / `PARSER_FIRECRAWL_BASE_URL`. На VPS по умолчанию часто `http://host.docker.internal:3002` (в `docker-compose.yml` у `parser_cian` есть `extra_hosts: host.docker.internal:host-gateway`). Если Firecrawl в другом compose и в сети `firecrawl_backend`, в `.env` укажите URL вида `http://<имя_контейнера_api>:3002` и убедитесь, что сеть подключена к `parser_cian`. Проверка — раздел «Проверить связность с Firecrawl» выше.
+- **Ручной запуск с сервера** (`ssh` → `docker compose run …`) и **ночной cron шедулера** используют один Docker daemon и один проект — после правок они должны вести себя одинаково по сети и томам.
 
 ---
 
