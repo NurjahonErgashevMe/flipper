@@ -122,6 +122,7 @@ async def _flipper_bind_env_for_compose() -> dict[str, str]:
         _flipper_bind_env = {
             "FLIPPER_CREDENTIALS_SOURCE": f"{root}/credentials.json",
             "FLIPPER_DATA_SOURCE": f"{root}/data",
+            "FLIPPER_COOKIES_SOURCE": f"{root}/services/cookie_manager/cookies.json",
         }
         logger.info("Бинды compose: SCHEDULER_HOST_BIND_ROOT=%s", root)
         return _flipper_bind_env
@@ -162,6 +163,7 @@ async def _flipper_bind_env_for_compose() -> dict[str, str]:
             _flipper_bind_env = {
                 "FLIPPER_CREDENTIALS_SOURCE": f"{root}/credentials.json",
                 "FLIPPER_DATA_SOURCE": f"{root}/data",
+                "FLIPPER_COOKIES_SOURCE": f"{root}/services/cookie_manager/cookies.json",
             }
             logger.info(
                 "Бинды compose: корень репозитория на хосте Docker (inspect %s)=%s",

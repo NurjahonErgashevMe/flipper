@@ -46,7 +46,7 @@ services:
     environment:
       - TZ=Europe/Moscow
     volumes:
-      - ./services/cookie_manager/cookies.json:/app/cookies.json
+      - ${FLIPPER_COOKIES_SOURCE:-./services/cookie_manager/cookies.json}:/app/cookies.json
     depends_on:
       - app_redis
     networks:
