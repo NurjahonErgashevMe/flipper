@@ -35,6 +35,10 @@ RETRY_BACKOFF_BASE = int(os.getenv("SCHEDULER_RETRY_BACKOFF_BASE", "30"))
 JOB_TIMEOUT_PARSER = int(os.getenv("SCHEDULER_JOB_TIMEOUT_PARSER", str(3 * 3600)))
 JOB_TIMEOUT_COUNTER = int(os.getenv("SCHEDULER_JOB_TIMEOUT_COUNTER", str(30 * 60)))
 
+# Сколько ждать первой строки вывода от `docker compose run`. Если за это время
+# процесс не выдал ничего — считаем, что compose завис на depends_on/healthcheck.
+STARTUP_STALL_TIMEOUT = int(os.getenv("SCHEDULER_STARTUP_STALL_TIMEOUT", "300"))
+
 LOCK_ACQUIRE_TIMEOUT = int(os.getenv("SCHEDULER_LOCK_TIMEOUT", str(6 * 3600)))
 
 LOG_FILE = os.getenv("SCHEDULER_LOG_FILE", "data/logs/scheduler.log")
@@ -191,7 +195,11 @@ async def run_docker_compose(
     Без --no-deps: как у ручного `docker compose run`, поднимаются/проверяются
     depends_on (cookie_manager, postgres и т.д.) перед одноразовым контейнером.
 
-    Возвращает exit code. При таймауте убивает процесс и возвращает -1.
+    Стримит stdout подпроцесса построчно в лог шедулера — чтобы прогресс был
+    виден в реальном времени, а не только после завершения.
+
+    Возвращает exit code. При таймауте/зависании старта убивает процесс и
+    возвращает -1.
     """
     project_name = os.getenv("COMPOSE_PROJECT_NAME", "flipper")
     cmd = [
@@ -214,21 +222,59 @@ async def run_docker_compose(
         env=sub_env,
     )
 
-    try:
-        stdout_data, _ = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
-        )
-    except asyncio.TimeoutError:
-        logger.error("TIMEOUT (%ss) для %s %s — убиваю процесс", timeout, service, args)
-        proc.kill()
-        await proc.wait()
+    async def _kill(reason: str) -> int:
+        logger.error("%s %s: %s — убиваю процесс", service, args, reason)
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("%s %s: процесс не завершился за 10s после kill()", service, args)
         return -1
 
-    output = (stdout_data or b"").decode("utf-8", errors="replace")
-    for line in output.rstrip().split("\n")[-30:]:
-        logger.info("[%s] %s", service, line)
+    assert proc.stdout is not None
 
-    code = proc.returncode or 0
+    loop = asyncio.get_event_loop()
+    overall_deadline = loop.time() + timeout
+    start_ts = loop.time()
+    got_any_output = False
+
+    while True:
+        now = loop.time()
+        if now >= overall_deadline:
+            return await _kill(f"TIMEOUT ({timeout}s)")
+        if not got_any_output and (now - start_ts) > STARTUP_STALL_TIMEOUT:
+            return await _kill(
+                f"нет вывода {STARTUP_STALL_TIMEOUT}s от старта — compose завис "
+                f"(вероятно depends_on/healthcheck)"
+            )
+
+        remaining = overall_deadline - now
+        read_timeout = min(30.0, max(1.0, remaining))
+        try:
+            line = await asyncio.wait_for(
+                proc.stdout.readline(), timeout=read_timeout
+            )
+        except asyncio.TimeoutError:
+            continue
+        if not line:
+            break
+
+        got_any_output = True
+        logger.info(
+            "[%s] %s",
+            service,
+            line.decode("utf-8", errors="replace").rstrip(),
+        )
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        return await _kill("процесс не завершился за 10s после закрытия stdout")
+
+    code = proc.returncode if proc.returncode is not None else 0
     logger.info("%s %s завершился с кодом %s", service, args, code)
     return code
 
