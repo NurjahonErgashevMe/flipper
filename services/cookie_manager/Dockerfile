@@ -20,9 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN chmod +x /app/entrypoint.sh \
-    && [ -f /app/cookies.json ] || echo "[]" > /app/cookies.json \
-    && [ -f /app/accounts.json ] || echo '{"current": null, "accounts": []}' > /app/accounts.json
+RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8000
 

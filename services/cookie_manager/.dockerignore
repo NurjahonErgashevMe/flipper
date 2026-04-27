@@ -1,0 +1,13 @@
+# Не тащим в образ хостовые файлы — они монтируются через docker volumes.
+cookies.json
+cookies.json.tmp
+accounts.json
+accounts.json.tmp
+
+# Прочий мусор
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+.DS_Store
