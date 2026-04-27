@@ -47,16 +47,25 @@ services:
     volumes:
       - ${FLIPPER_COOKIES_SOURCE:-./services/cookie_manager/cookies.json}:/app/cookies.json
       - ${FLIPPER_ACCOUNTS_SOURCE:-./services/cookie_manager/accounts.json}:/app/accounts.json
+      # Прокси для авто-логина (тот же файл, что использует parser_cian).
+      # ro — конфиг, контейнер не должен его менять.
+      - ${FLIPPER_DATA_SOURCE:-./data}:/app/data:ro
     depends_on:
       - app_redis
     networks:
       - flipper_network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
+      # /health отдаёт 503 пока нет DMIR_AUTH (на старте идёт авто-логин:
+      # warm-up + is-email-registered + validate-login + logon × несколько
+      # аккаунтов с задержками 6-10s между ними). Поэтому даём щедрый
+      # start_period: пока он не истёк, провалившийся healthcheck НЕ
+      # помечает контейнер как unhealthy. interval 5s — чтобы parser_cian
+      # стартовал сразу после первого успешного логина.
+      interval: 5s
       timeout: 10s
-      retries: 3
-      start_period: 10s
+      retries: 5
+      start_period: 180s
 
   app_postgres:
     image: postgres:16-alpine

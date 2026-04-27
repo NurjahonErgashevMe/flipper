@@ -2,19 +2,34 @@
 auto_login.py — автоматический логин/регистрация на cian.ru через публичные API
 с пулом аккаунтов и ротацией при ошибке.
 
-Поток (см. services/accaountant/*.bash и image*.png):
+ВАЖНО: используем curl_cffi с impersonate="chrome" — обычный httpx ловит cian-captcha
+из-за нестандартного TLS-фингерпринта. curl_cffi мимикрирует Chrome на уровне TLS/JA3
+(тот же приём использует основной парсер services/parser_cian).
+
+ВАЖНО-2: cian smart-банит «слишком пустых» клиентов — если в jar нет полного набора
+аналитических + анти-бот кук (_ga, _gcl_au, _ym_*, tmr_*, sopr_*, **domain_sid**,
+**_spx**, **tmr_detect**), сервер возвращает 200 на quick-register/validate-login,
+но в logOnInfo всё равно выдаёт «мёртвый» token. Поэтому мы пред-засеваем в
+_seed_cookies() полный набор реалистичных значений.
+
+ВАЖНО-3: validate-login и quick-register НЕ выдают DMIR_AUTH в Set-Cookie напрямую.
+Они возвращают одноразовый logOnInfo.token. Этот token надо обменять на DMIR_AUTH
+GET-запросом на api-субдомен:
+    GET https://api.cian.ru/authentication/v1/logon/?token=<token>&login=<email>
+В ответе HTTP 200, body 'true' и Set-Cookie: DMIR_AUTH=…
+ВНИМАНИЕ: `logOnUrl` в ответе сервера обманчив — он указывает на www.cian.ru,
+но тот эндпоинт возвращает 405/500. Реальный обменник — на api.cian.ru.
+
+Поток:
+    0. seed cookies + GET https://www.cian.ru/  (warm-up, забираем _yasc)
     1. GET https://api.cian.ru/users/v1/is-email-registered/?email=<E>
        → {"isRegistered": bool}
-    2a. Если зарегистрирован → POST https://api.cian.ru/authentication/v1/validate-login-password/
-        с JSON {"login": E, "password": "12345678me"}.
-    2b. Если НЕ зарегистрирован → POST https://www.cian.ru/api/users/v1/quick-register/
-        с form-data email=&password=12345678me&isProfessional=false&...
-    3. На 200 сервер ставит Set-Cookie (DMIR_AUTH, cookieUserID, cian_ruid, DeviceId_*).
-       Эти куки httpx сохраняет в jar — мы их сериализуем в Playwright-формат
-       (тот же, что использует services/cookie_manager/cookies.json).
+    2a. Если зарегистрирован → POST validate-login-password (JSON)
+    2b. Если НЕ зарегистрирован → POST quick-register (form-data)
+    3. Из ответа достаём logOnInfo[0].token и делаем GET-обмен на logon endpoint.
+    4. В Set-Cookie прилетает DMIR_AUTH — сохраняем в jar.
 
-Если перебрали все аккаунты и ни один не залогинился — вернёт ошибку и
-вызывающий код решит, что делать (например, упасть в ручной NoVNC).
+Если перебрали все аккаунты и ни один не залогинился — возвращаем ошибку.
 """
 
 from __future__ import annotations
@@ -24,14 +39,56 @@ import json
 import logging
 import random
 import time
+import uuid
 from dataclasses import dataclass
 from http.cookiejar import Cookie, CookieJar
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import httpx
+from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger(__name__)
+
+
+class RateLimitedError(Exception):
+    """cian вернул 429 — IP зарейтлимичен. Прерываем цикл."""
+
+
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """
+    Пишет JSON в файл с двумя стратегиями:
+      1. tmp + os.replace (атомарно) — для обычных файлов.
+      2. Fallback: write напрямую — нужен для docker bind-mount файлов
+         (volume `./host/file.json:/container/file.json`). В таком случае
+         `os.replace` падает с OSError(EBUSY/EXDEV), потому что docker
+         монтирует inode исходного файла, и заменить его внутри контейнера
+         нельзя — можно только переписать содержимое.
+
+    Без этого fallback'а в реальном деплое cookies.json никогда не
+    обновляется и парсер не получает свежих кук.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(path)
+        return
+    except OSError as exc:
+        logger.warning(
+            f"_atomic_write_json: rename {tmp} → {path} упал ({exc!r}), "
+            "переключаюсь на in-place запись (видимо bind-mount файла)"
+        )
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    # Fallback: пишем напрямую в смонтированный файл (truncate + write).
+    with path.open("w", encoding="utf-8") as f:
+        f.write(payload)
+        f.flush()
+
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -41,6 +98,12 @@ CIAN_HOME = "https://www.cian.ru/"
 URL_IS_REGISTERED = "https://api.cian.ru/users/v1/is-email-registered/"
 URL_VALIDATE_LOGIN = "https://api.cian.ru/authentication/v1/validate-login-password/"
 URL_QUICK_REGISTER = "https://www.cian.ru/api/users/v1/quick-register/"
+# Реальный «обмен logOnInfo.token на DMIR_AUTH» live на api-субдомене.
+# Сервер в logOnInfo возвращает обманчивый `//www.cian.ru/api/users/logon/`,
+# но тот эндпоинт всегда отвечает 405/500. Реальный обменник —
+#   GET /authentication/v1/logon/?token=<token>&login=<email>
+# и в Set-Cookie приходит DMIR_AUTH.
+URL_LOGON = "https://api.cian.ru/authentication/v1/logon/"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -66,6 +129,70 @@ AUTH_COOKIE_NAME = "DMIR_AUTH"
 
 # Сколько раз подряд аккаунт может упасть, прежде чем мы пометим его blocked.
 MAX_FAIL_BEFORE_BLOCK = 3
+
+
+# ── Логи: вспомогательные функции ────────────────────────────────────────────
+
+
+def _mask(value: Any, head: int = 6, tail: int = 4) -> str:
+    """Маскируем длинные секреты (token, password, DMIR_AUTH cookie) для DEBUG."""
+    s = str(value or "")
+    if len(s) <= head + tail + 3:
+        return s
+    return f"{s[:head]}…{s[-tail:]}({len(s)}b)"
+
+
+def _mask_proxy(proxy_url: str) -> str:
+    """
+    Из 'http://user:pass@host:port' → 'host:port'. Не светим креды в логи.
+    """
+    try:
+        from urllib.parse import urlparse
+
+        u = urlparse(proxy_url)
+        return f"{u.hostname}:{u.port}" if u.hostname else proxy_url
+    except Exception:
+        return "<proxy>"
+
+
+def _jar_names(client_or_jar) -> List[str]:
+    """Имена всех cookies в jar — для краткого DEBUG-отображения."""
+    try:
+        jar = getattr(client_or_jar, "cookies", None)
+        if jar is not None:
+            jar = jar.jar
+        else:
+            jar = client_or_jar
+        return sorted(c.name for c in jar)
+    except Exception:
+        return []
+
+
+def _log_response_brief(label: str, resp, body_limit: int = 200) -> None:
+    """Логируем ответ HTTP в одной строке (DEBUG)."""
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        body = (resp.text or "")
+    except Exception:
+        body = ""
+    snippet = body[:body_limit].replace("\n", " ")
+    if len(body) > body_limit:
+        snippet += f"…(+{len(body) - body_limit}b)"
+    sc = []
+    try:
+        h = resp.headers
+        if hasattr(h, "get_list"):
+            sc = h.get_list("set-cookie") or []
+        elif h.get("set-cookie"):
+            sc = [h.get("set-cookie")]
+    except Exception:
+        pass
+    sc_brief = [(c.split(";", 1)[0]) for c in sc] if sc else []
+    logger.debug(
+        f"  ← {label}: HTTP {resp.status_code} "
+        f"set-cookie={sc_brief or '∅'} body={snippet!r}"
+    )
 
 # Email-генератор: имитируем «настоящих» риелторов / инвесторов с обычной почтой.
 # Берём редкие, но реальные русские имена + редкие фамилии, добавляем тематический
@@ -255,17 +382,39 @@ class AutoLogin:
         cookies_file: str | Path,
         password: str = DEFAULT_PASSWORD,
         request_timeout: float = 20.0,
+        proxies: Optional[List[str]] = None,
     ) -> None:
+        """
+        Args:
+            proxies: Список прокси-URL вида `http://user:pass@host:port`.
+                На каждый цикл логина рандомно выбирается один прокси.
+                Нужно когда «голый» IP сервера зарейтлимичен/забанен на cian.
+                Пустой список / None → запросы напрямую (поведение по умолчанию).
+        """
         self.accounts_file = Path(accounts_file)
         self.cookies_file = Path(cookies_file)
         self.password = password
         self.request_timeout = request_timeout
+        self.proxies: List[str] = list(proxies or [])
         self._lock = asyncio.Lock()
+        if self.proxies:
+            logger.info(
+                f"AutoLogin: подключено прокси из пула: {len(self.proxies)} шт."
+            )
+        else:
+            logger.info("AutoLogin: прокси не заданы, запросы напрямую")
+
+    def _pick_proxy(self) -> Optional[str]:
+        """Случайный прокси из пула (или None если пул пуст)."""
+        if not self.proxies:
+            return None
+        return random.choice(self.proxies)
 
     # ── persistence ──────────────────────────────────────────────────────────
 
     def _load_state(self) -> Dict[str, Any]:
         if not self.accounts_file.exists():
+            logger.debug(f"_load_state: {self.accounts_file} не существует")
             return {"current": None, "accounts": []}
         try:
             data = json.loads(self.accounts_file.read_text(encoding="utf-8"))
@@ -279,32 +428,34 @@ class AutoLogin:
             return {"current": None, "accounts": []}
 
     def _save_state(self, state: Dict[str, Any]) -> None:
-        self.accounts_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.accounts_file.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        _atomic_write_json(self.accounts_file, state)
+        logger.debug(
+            f"_save_state: current={state.get('current')}, "
+            f"accounts={len(state.get('accounts', []))} → {self.accounts_file}"
         )
-        tmp.replace(self.accounts_file)
 
     def _load_cookies(self) -> List[Dict[str, Any]]:
         if not self.cookies_file.exists():
+            logger.debug(f"_load_cookies: {self.cookies_file} не существует")
             return []
         try:
             data = json.loads(self.cookies_file.read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
+            cookies = data if isinstance(data, list) else []
+            logger.debug(f"_load_cookies: прочитано {len(cookies)} из {self.cookies_file}")
+            return cookies
         except Exception as exc:
             logger.error(f"Не удалось прочитать {self.cookies_file}: {exc}")
             return []
 
     def _save_cookies(self, cookies: List[Dict[str, Any]]) -> None:
-        self.cookies_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.cookies_file.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(cookies, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        _atomic_write_json(self.cookies_file, cookies)
+        names = sorted({c.get("name") for c in cookies if c.get("name")})
+        has_auth = any(c.get("name") == AUTH_COOKIE_NAME for c in cookies)
+        logger.debug(
+            f"_save_cookies: записано {len(cookies)} cookies "
+            f"(DMIR_AUTH={'yes' if has_auth else 'no'}) → {self.cookies_file}; "
+            f"names={names}"
         )
-        tmp.replace(self.cookies_file)
 
     # ── account selection ────────────────────────────────────────────────────
 
@@ -323,13 +474,23 @@ class AutoLogin:
         if current and current not in skip:
             for acc in accounts:
                 if acc.email == current and not acc.blocked:
+                    logger.debug(f"_pick_account: использую current={acc.email}")
                     return acc
 
         # 2. любой не-blocked, не в skip
         for acc in accounts:
             if not acc.blocked and acc.email not in skip:
+                logger.debug(
+                    f"_pick_account: первый незаблокированный={acc.email} "
+                    f"(всего в пуле={len(accounts)}, skip={skip})"
+                )
                 return acc
 
+        logger.debug(
+            f"_pick_account: подходящих нет "
+            f"(всего={len(accounts)}, blocked={sum(1 for a in accounts if a.blocked)}, "
+            f"skip={skip})"
+        )
         return None
 
     def _add_new_account(self, state: Dict[str, Any]) -> Account:
@@ -346,11 +507,90 @@ class AutoLogin:
         state.setdefault("accounts", []).append(acc.to_dict())
         return acc
 
-    # ── HTTP helpers ─────────────────────────────────────────────────────────
+    # ── HTTP helpers (curl_cffi с impersonate=chrome) ────────────────────────
 
-    async def _warmup(self, client: httpx.AsyncClient) -> None:
-        """Заходим на главную, чтобы получить _CIAN_GK и анти-бот куки."""
+    @staticmethod
+    def _seed_cookies(client: AsyncSession) -> None:
+        """
+        Пред-засеваем полный набор «аналитических» и анти-бот кук,
+        как у живого юзера. Снимок взят из реального quick-register.bash:
+        там пользователь — свежий аноним (без DMIR_AUTH), и сразу после
+        quick-register сервер выдаёт DMIR_AUTH прямо в Set-Cookie.
+        То есть никакого «второго logon-шага» нет — нужны все нужные cookies.
+
+        Критически важные (из quick-register.bash):
+          • domain_sid  — anti-bot session id (формат `<base64>:<timestamp_ms>`)
+          • _spx        — base64-JSON с UUID (anti-bot session protection)
+          • tmr_detect  — Mail.ru detector (`0|<timestamp_ms>`)
+
+        Без этих трёх cian возвращает 200, но MOLCHA НЕ выдаёт DMIR_AUTH.
+        """
         try:
+            import base64
+
+            now = int(time.time())
+            ms = now * 1000 + random.randint(0, 999)
+            ga_random = random.randint(10**9, 10**10 - 1)
+            ym_uid = f"{now}{random.randint(10**5, 10**6 - 1)}"
+            tmr_lvid = uuid.uuid4().hex  # 32-hex
+            sopr_session = uuid.uuid4().hex[:16]  # 16-hex
+
+            # domain_sid: 22-символьный base64-id, потом ':', потом timestamp_ms.
+            domain_sid_id = (
+                base64.urlsafe_b64encode(uuid.uuid4().bytes)
+                .decode()
+                .rstrip("=")[:22]
+            )
+            domain_sid = f"{domain_sid_id}:{ms}"
+
+            # _spx: base64(JSON). Структура взята из quick-register.bash.
+            spx_payload = json.dumps(
+                {
+                    "id": str(uuid.uuid4()),
+                    "source": "",
+                    "fixed": {"stack": [0]},
+                },
+                separators=(",", ":"),
+            )
+            spx = base64.b64encode(spx_payload.encode()).decode()
+
+            cookies = {
+                "_CIAN_GK": str(uuid.uuid4()),
+                "_gcl_au": f"1.1.{ga_random}.{now}",
+                "_ga": f"GA1.1.{ga_random}.{now}",
+                "_ga_3369S417EL": (
+                    f"GS2.1.s{now}$o1$g0$t{now}$j60$l0$h0"
+                ),
+                "_ym_uid": ym_uid,
+                "_ym_d": str(now),
+                "_ym_isad": "2",
+                "_ym_visorc": "b",
+                "tmr_lvid": tmr_lvid,
+                "tmr_lvidTS": str(ms),
+                "tmr_detect": f"0|{ms}",
+                "uxs_uid": str(uuid.uuid4()),
+                "uxfb_usertype": "searcher",
+                "cookie_agreement_accepted": "1",
+                "login_mro_popup": "1",
+                "sopr_utm": "%7B%22utm_source%22%3A+%22direct%22%2C+%22utm_medium%22%3A+%22None%22%7D",
+                "sopr_session": sopr_session,
+                "domain_sid": domain_sid,
+                "_spx": spx,
+            }
+            for name, value in cookies.items():
+                client.cookies.set(name, value, domain=".cian.ru")
+            logger.debug(
+                f"seed_cookies: посеяли {len(cookies)} cookies → "
+                f"{sorted(cookies.keys())}"
+            )
+        except Exception as exc:
+            logger.debug(f"seed_cookies: не удалось проставить ({exc})")
+
+    async def _warmup(self, client: AsyncSession) -> None:
+        """Заходим на главную, чтобы получить _yasc и прочие анти-бот куки."""
+        try:
+            before = set(_jar_names(client))
+            logger.debug(f"  → warm-up GET {CIAN_HOME}  (jar before={len(before)})")
             resp = await client.get(
                 CIAN_HOME,
                 headers={
@@ -367,20 +607,41 @@ class AutoLogin:
                     "upgrade-insecure-requests": "1",
                 },
                 timeout=self.request_timeout,
+                allow_redirects=True,
             )
-            logger.debug(f"warm-up GET {CIAN_HOME} → {resp.status_code}, cookies={len(list(client.cookies.jar))}")
+            final_url = str(resp.url or "")
+            after = set(_jar_names(client))
+            new = sorted(after - before)
+            logger.info(
+                f"warm-up: {resp.status_code}, final_url={final_url}, jar={len(after)}"
+            )
+            logger.debug(
+                f"  ← warm-up: HTTP {resp.status_code} new_cookies={new or '∅'}"
+            )
+            if "captcha" in final_url:
+                logger.warning(
+                    f"⚠️ warm-up redirected to CAPTCHA ({final_url}). "
+                    f"Логин почти наверняка не пройдёт — нужен другой IP / прокси."
+                )
         except Exception as exc:
-            logger.warning(f"warm-up не удался ({exc}); идём дальше — куки могут быть частичными")
+            logger.warning(f"warm-up не удался ({exc}); пробуем без него")
 
-    async def _is_email_registered(self, client: httpx.AsyncClient, email: str) -> bool:
+    async def _is_email_registered(self, client: AsyncSession, email: str) -> bool:
         headers = BASE_HEADERS.copy()
         headers["sec-fetch-site"] = "same-site"
+        logger.debug(f"  → is-email-registered GET {URL_IS_REGISTERED}?email={email}")
         resp = await client.get(
             URL_IS_REGISTERED,
             headers=headers,
             params={"email": email},
             timeout=self.request_timeout,
         )
+        _log_response_brief("is-email-registered", resp)
+        if resp.status_code == 429:
+            # IP зарейтлимичен — нет смысла дёргать дальше: только усугубим.
+            raise RateLimitedError(
+                f"is-email-registered HTTP 429: rate-limit, нужно подождать"
+            )
         if resp.status_code != 200:
             raise RuntimeError(
                 f"is-email-registered HTTP {resp.status_code}: {resp.text[:200]}"
@@ -389,28 +650,46 @@ class AutoLogin:
             payload = resp.json()
         except Exception as exc:
             raise RuntimeError(f"is-email-registered невалидный JSON: {exc}") from exc
-        return bool(payload.get("isRegistered"))
+        is_reg = bool(payload.get("isRegistered"))
+        logger.debug(f"     isRegistered={is_reg} (payload={payload})")
+        return is_reg
 
     async def _validate_login(
-        self, client: httpx.AsyncClient, email: str, password: str
-    ) -> httpx.Response:
+        self, client: AsyncSession, email: str, password: str
+    ):
         headers = BASE_HEADERS.copy()
         headers["content-type"] = "application/json"
         headers["sec-fetch-site"] = "same-site"
-        return await client.post(
+        logger.debug(
+            f"  → validate-login POST {URL_VALIDATE_LOGIN} "
+            f"json={{login:{email}, password:{_mask(password)}}}"
+        )
+        before = set(_jar_names(client))
+        resp = await client.post(
             URL_VALIDATE_LOGIN,
             headers=headers,
             json={"login": email, "password": password},
             timeout=self.request_timeout,
         )
+        _log_response_brief("validate-login", resp, body_limit=300)
+        new = sorted(set(_jar_names(client)) - before)
+        if new:
+            logger.debug(f"     new cookies after validate-login: {new}")
+        return resp
 
     async def _quick_register(
-        self, client: httpx.AsyncClient, email: str, password: str
-    ) -> httpx.Response:
+        self, client: AsyncSession, email: str, password: str
+    ):
         headers = BASE_HEADERS.copy()
         headers["content-type"] = "application/x-www-form-urlencoded"
         headers["sec-fetch-site"] = "same-origin"
-        return await client.post(
+        logger.debug(
+            f"  → quick-register POST {URL_QUICK_REGISTER} "
+            f"form={{email:{email}, password:{_mask(password)}, "
+            f"isProfessional:false, enableSubscription:true, isAcceptLicence:true}}"
+        )
+        before = set(_jar_names(client))
+        resp = await client.post(
             URL_QUICK_REGISTER,
             headers=headers,
             data={
@@ -422,13 +701,100 @@ class AutoLogin:
             },
             timeout=self.request_timeout,
         )
+        _log_response_brief("quick-register", resp, body_limit=300)
+        new = sorted(set(_jar_names(client)) - before)
+        if new:
+            logger.debug(f"     new cookies after quick-register: {new}")
+        return resp
 
     @staticmethod
-    def _login_response_ok(resp: httpx.Response) -> Tuple[bool, str]:
+    def _extract_logon_info(resp) -> Optional[Dict[str, str]]:
+        """
+        Из ответа validate-login / quick-register достаём первый logOnInfo:
+            { "logOnUrl": "https://www.cian.ru/api/users/logon/", "token": "..." }
+        Сервер отдаёт `//www.cian.ru/...` (protocol-relative) — добавляем https.
+        """
+        try:
+            payload = resp.json()
+        except Exception:
+            logger.debug("extract_logon_info: ответ не JSON")
+            return None
+        if not isinstance(payload, dict):
+            return None
+        logon_info = payload.get("logOnInfo") or []
+        if not isinstance(logon_info, list) or not logon_info:
+            logger.debug(f"extract_logon_info: нет logOnInfo в payload (keys={list(payload.keys())})")
+            return None
+        first = logon_info[0]
+        if not isinstance(first, dict):
+            return None
+        url = first.get("logOnUrl")
+        token = first.get("token")
+        if not url or not token:
+            logger.debug(f"extract_logon_info: пусто url={url!r} token={_mask(token)}")
+            return None
+        if url.startswith("//"):
+            url = "https:" + url
+        elif url.startswith("/"):
+            url = "https://www.cian.ru" + url
+        logger.debug(
+            f"extract_logon_info: url={url} token={_mask(token)}"
+        )
+        return {"logOnUrl": url, "token": token}
+
+    async def _perform_logon(
+        self, client: AsyncSession, token: str, login: str) -> None:
+        """
+        Меняем одноразовый logOnInfo.token на cookie DMIR_AUTH.
+
+        Реальный обменник:
+            GET https://api.cian.ru/authentication/v1/logon/
+                ?token=<token>&login=<email>
+        В Set-Cookie прилетает DMIR_AUTH (httponly, домен `.cian.ru`).
+        Body — просто строка `true`.
+
+        Token одноразовый — делаем строго ОДНУ попытку.
+        """
+        headers = BASE_HEADERS.copy()
+        headers["sec-fetch-site"] = "same-site"
+        headers["accept"] = "*/*"
+
+        logger.debug(
+            f"  → logon GET {URL_LOGON}?token={_mask(token)}&login={login}"
+        )
+        before = {c.name for c in client.cookies.jar}
+        resp = await client.get(
+            URL_LOGON,
+            headers=headers,
+            params={"token": token, "login": login},
+            timeout=self.request_timeout,
+        )
+        _log_response_brief("logon", resp)
+        after = {c.name for c in client.cookies.jar}
+        new_cookies = sorted(after - before)
+        body = ""
+        try:
+            body = (resp.text or "")[:200]
+        except Exception:
+            pass
+        # DMIR_AUTH мы не показываем целиком (это секрет) — только prefix.
+        if AUTH_COOKIE_NAME in new_cookies:
+            for c in client.cookies.jar:
+                if c.name == AUTH_COOKIE_NAME:
+                    logger.debug(
+                        f"     получен {AUTH_COOKIE_NAME}={_mask(c.value, 8, 6)}"
+                    )
+                    break
+        logger.info(
+            f"logon GET: HTTP {resp.status_code}, "
+            f"new cookies={new_cookies}, body={body!r}"
+        )
+
+    @staticmethod
+    def _login_response_ok(resp) -> Tuple[bool, str]:
         """Анализ ответа на validate-login / quick-register."""
         if resp.status_code != 200:
             return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
-        # Сервер на 200 иногда возвращает payload с ошибкой.
         try:
             payload = resp.json()
         except Exception:
@@ -446,20 +812,37 @@ class AutoLogin:
 
     async def login_one(self, email: str, password: str) -> LoginResult:
         """
-        Полный цикл для одного e-mail: warm-up → проверка регистрации → логин/регистрация.
-        Возвращает LoginResult c cookies (если успех) либо c message (если ошибка).
+        Полный цикл для одного e-mail: warm-up → is-email-registered →
+        validate-login | quick-register. curl_cffi с impersonate="chrome"
+        мимикрирует TLS-фингерпринт настоящего Chrome, иначе cian редиректит
+        на /cian-captcha/.
         """
-        async with httpx.AsyncClient(
-            timeout=self.request_timeout,
-            follow_redirects=True,
-            trust_env=False,
-            headers={"user-agent": USER_AGENT},
-        ) as client:
+        proxy = self._pick_proxy()
+        # Логируем без логина/пароля — `_mask_proxy` оставляет только host:port.
+        proxy_label = _mask_proxy(proxy) if proxy else "direct"
+        logger.debug(
+            f"login_one[{email}]: старт (password={_mask(password)}, proxy={proxy_label})"
+        )
+
+        session_kwargs: Dict[str, Any] = {
+            "timeout": self.request_timeout,
+            "impersonate": "chrome",
+            "headers": {"user-agent": USER_AGENT},
+        }
+        if proxy:
+            # curl_cffi.AsyncSession принимает proxies={"http": ..., "https": ...}
+            session_kwargs["proxies"] = {"http": proxy, "https": proxy}
+
+        async with AsyncSession(**session_kwargs) as client:
+            self._seed_cookies(client)
             await self._warmup(client)
 
             # 1. is-email-registered
             try:
                 registered = await self._is_email_registered(client, email)
+            except RateLimitedError:
+                # Пробрасываем выше — perform_login_cycle прервёт цикл.
+                raise
             except Exception as exc:
                 return LoginResult(False, email, False, f"is-email-registered: {exc}")
 
@@ -478,18 +861,53 @@ class AutoLogin:
             if not ok:
                 return LoginResult(False, email, registered, f"login {why}")
 
-            # 3. Куки выдали? Проверяем DMIR_AUTH.
+            # 3. DMIR_AUTH в Set-Cookie прямо от quick-register / validate-login
+            #    приходит крайне редко — обычно сервер отдаёт одноразовый
+            #    `logOnInfo.token`, который надо обменять на DMIR_AUTH через
+            #    отдельный POST application/x-www-form-urlencoded на logOnUrl
+            #    (//www.cian.ru/api/users/logon/).
             cookie_list = jar_to_list(client.cookies.jar)
             has_auth = any(
                 c.get("name") == AUTH_COOKIE_NAME and c.get("value") for c in cookie_list
             )
+
             if not has_auth:
+                logon_info = self._extract_logon_info(resp)
+                if logon_info:
+                    logger.debug(
+                        f"[{email}] DMIR_AUTH ещё нет → нужен logon-обмен"
+                    )
+                    try:
+                        await self._perform_logon(
+                            client, token=logon_info["token"], login=email
+                        )
+                    except Exception as exc:
+                        logger.warning(f"[{email}] logon: {exc}")
+                    cookie_list = jar_to_list(client.cookies.jar)
+                    has_auth = any(
+                        c.get("name") == AUTH_COOKIE_NAME and c.get("value")
+                        for c in cookie_list
+                    )
+                else:
+                    logger.debug(
+                        f"[{email}] DMIR_AUTH нет и logOnInfo тоже нет — провал"
+                    )
+
+            if not has_auth:
+                names = sorted({c.get("name") for c in cookie_list if c.get("name")})
+                body = ""
+                try:
+                    body = (resp.text or "")[:300]
+                except Exception:
+                    pass
                 return LoginResult(
                     False,
                     email,
                     registered,
-                    f"login HTTP 200, но {AUTH_COOKIE_NAME} не выдан. "
-                    f"Получено кук: {len(cookie_list)}",
+                    (
+                        f"login HTTP 200 + logon не выдал {AUTH_COOKIE_NAME}. "
+                        f"jar={len(cookie_list)} {names}. Body: {body!r}"
+                    ),
                 )
 
             return LoginResult(
@@ -514,18 +932,37 @@ class AutoLogin:
         Returns:
             (ok, message, used_email)
         """
+        logger.debug(
+            f"perform_login_cycle: max_accounts={max_accounts}, "
+            f"force_new_email={force_new_email}"
+        )
         async with self._lock:
             tried: List[str] = []
 
             for attempt in range(1, max_accounts + 1):
                 state = self._load_state()
+                logger.debug(
+                    f"  pool: current={state.get('current')}, "
+                    f"total={len(state.get('accounts', []))}, "
+                    f"blocked={sum(1 for a in state.get('accounts', []) if a.get('blocked'))}, "
+                    f"tried_so_far={tried}"
+                )
 
                 if force_new_email and attempt == 1:
                     acc = self._add_new_account(state)
+                    logger.debug(f"  → выбран свежесгенерированный e-mail: {acc.email}")
                 else:
                     acc = self._pick_account(state, skip=tried)
                     if acc is None:
                         acc = self._add_new_account(state)
+                        logger.debug(
+                            f"  → пул исчерпан, сгенерирован новый: {acc.email}"
+                        )
+                    else:
+                        logger.debug(
+                            f"  → выбран из пула: {acc.email} "
+                            f"(registered={acc.registered}, fail_count={acc.fail_count})"
+                        )
 
                 # фиксируем как «пробуем сейчас»
                 state["current"] = acc.email
@@ -537,7 +974,15 @@ class AutoLogin:
                 )
                 tried.append(acc.email)
 
-                result = await self.login_one(acc.email, acc.password)
+                try:
+                    result = await self.login_one(acc.email, acc.password)
+                except RateLimitedError as exc:
+                    # IP зарейтлимичен: бессмысленно пытаться следующих аккаунтов.
+                    logger.warning(
+                        f"🛑 cian вернул 429 на {acc.email}: {exc}. "
+                        f"Прерываю цикл, нужно подождать (~5-15 минут) и попробовать снова."
+                    )
+                    return False, f"rate-limited by cian: {exc}", None
 
                 # Перечитываем state (на случай гонок), чтобы обновить именно этот акк.
                 state = self._load_state()
@@ -558,6 +1003,11 @@ class AutoLogin:
                     existing = self._load_cookies()
                     merged = merge_cookie_lists(existing, result.cookies)
                     self._save_cookies(merged)
+                    logger.debug(
+                        f"  cookies merge: existing={len(existing)} + "
+                        f"new={len(result.cookies)} → saved={len(merged)} "
+                        f"в {self.cookies_file}"
+                    )
 
                     acc_dict["registered"] = True
                     acc_dict["blocked"] = False
@@ -587,8 +1037,9 @@ class AutoLogin:
                     state["current"] = None
                 self._save_state(state)
 
-                # лёгкая пауза, чтобы не долбить cian
-                await asyncio.sleep(1.5)
+                # Пауза между аккаунтами: cian быстро ловит 429-rate-limit,
+                # если запросы идут чаще чем ~1/5s. Делаем 6-10s + джиттер.
+                await asyncio.sleep(random.uniform(6.0, 10.0))
 
             return (
                 False,

@@ -462,9 +462,15 @@ class AdParser:
         logger.info(f"Cookie Manager URL: {self.cookie_manager_url}")
 
     async def _fetch_cookies_from_manager(self) -> str:
-        """Один запрос GET /cookies (без кэша). cookie_manager обычно в NO_PROXY."""
+        """
+        Один запрос GET /cookies (без кэша). cookie_manager обычно в NO_PROXY.
+
+        Таймаут 120s — потому что cookie_manager при идущем авто-логине
+        ДЕРЖИТ соединение и ждёт окончания (до ~90s), чтобы все воркеры
+        дождались свежих кук, а не падали кучей с 503 «retry later».
+        """
         try:
-            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
                 resp = await client.get(f"{self.cookie_manager_url}/cookies")
 
                 if resp.status_code == 503:
