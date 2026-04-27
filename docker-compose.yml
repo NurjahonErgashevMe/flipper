@@ -40,13 +40,13 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
-      - "8080:8080"
     env_file:
       - .env
     environment:
       - TZ=Europe/Moscow
     volumes:
       - ${FLIPPER_COOKIES_SOURCE:-./services/cookie_manager/cookies.json}:/app/cookies.json
+      - ${FLIPPER_ACCOUNTS_SOURCE:-./services/cookie_manager/accounts.json}:/app/accounts.json
     depends_on:
       - app_redis
     networks:

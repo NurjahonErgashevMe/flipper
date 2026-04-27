@@ -12,6 +12,8 @@ venv.bak/
 technical/
 cian_test/
 
+services/accaountant/
+
 data/proxies.txt
 
 # Byte-compiled / optimized / DLL files
@@ -39,6 +41,7 @@ htmlcov/
 credentials.json
 secret.json
 *.pem
+services/cookie_manager/accounts.json
 
 # Logs and DBs
 *.log
