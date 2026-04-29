@@ -106,6 +106,53 @@ async def send_alert(text: str) -> None:
 _flipper_bind_env_done = False
 _flipper_bind_env: dict[str, str] = {}
 
+# Дефолты для бинд-файлов, которые мы создаём, если их нет на хосте.
+# Без этого Docker при первом запуске создаёт ДИРЕКТОРИЮ на месте отсутствующего
+# source-файла → падение «not a directory: Are you trying to mount a directory
+# onto a file?». Пути относительные — резолвим внутри scheduler-контейнера
+# (там же смонтирован репозиторий через .:/app), поэтому файл создаётся и на хосте.
+_BIND_FILE_DEFAULTS: dict[str, tuple[str, str]] = {
+    # env_var: (relative_path_inside_repo, default_content)
+    "FLIPPER_COOKIES_SOURCE": ("services/cookie_manager/cookies.json", "[]"),
+    "FLIPPER_ACCOUNTS_SOURCE": (
+        "services/cookie_manager/accounts.json",
+        '{"current": null, "accounts": []}',
+    ),
+}
+
+
+def _ensure_bind_files_exist(bind_env: dict[str, str]) -> None:
+    """Создаёт недостающие bind-source файлы внутри репозитория.
+
+    Шедулер монтирует репозиторий как `.:/app`, поэтому файл, созданный по
+    пути `{COMPOSE_PROJECT_DIR}/<rel>`, появится и на хосте по пути
+    `{root}/<rel>` — именно тот, что compose передаст демону.
+    """
+    for env_var, (rel_path, default) in _BIND_FILE_DEFAULTS.items():
+        if env_var not in bind_env:
+            continue
+        local_path = os.path.join(COMPOSE_PROJECT_DIR, rel_path)
+        try:
+            if os.path.isdir(local_path):
+                logger.error(
+                    "Bind-source %s — это ДИРЕКТОРИЯ (Docker создал её ранее, "
+                    "пока FLIPPER_*_SOURCE был пустым). Удалите её на хосте: "
+                    "rm -rf <host_repo>/%s",
+                    local_path, rel_path,
+                )
+                continue
+            if not os.path.exists(local_path):
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, "w", encoding="utf-8") as f:
+                    f.write(default)
+                logger.info(
+                    "Создан недостающий bind-source %s (дефолт)", local_path
+                )
+        except OSError as exc:
+            logger.warning(
+                "Не удалось проверить/создать %s: %s", local_path, exc
+            )
+
 
 async def _flipper_bind_env_for_compose() -> dict[str, str]:
     """Пути к credentials/data на **хосте Docker** для volume в compose run.
@@ -127,7 +174,9 @@ async def _flipper_bind_env_for_compose() -> dict[str, str]:
             "FLIPPER_CREDENTIALS_SOURCE": f"{root}/credentials.json",
             "FLIPPER_DATA_SOURCE": f"{root}/data",
             "FLIPPER_COOKIES_SOURCE": f"{root}/services/cookie_manager/cookies.json",
+            "FLIPPER_ACCOUNTS_SOURCE": f"{root}/services/cookie_manager/accounts.json",
         }
+        _ensure_bind_files_exist(_flipper_bind_env)
         logger.info("Бинды compose: SCHEDULER_HOST_BIND_ROOT=%s", root)
         return _flipper_bind_env
 
@@ -168,7 +217,9 @@ async def _flipper_bind_env_for_compose() -> dict[str, str]:
                 "FLIPPER_CREDENTIALS_SOURCE": f"{root}/credentials.json",
                 "FLIPPER_DATA_SOURCE": f"{root}/data",
                 "FLIPPER_COOKIES_SOURCE": f"{root}/services/cookie_manager/cookies.json",
+                "FLIPPER_ACCOUNTS_SOURCE": f"{root}/services/cookie_manager/accounts.json",
             }
+            _ensure_bind_files_exist(_flipper_bind_env)
             logger.info(
                 "Бинды compose: корень репозитория на хосте Docker (inspect %s)=%s",
                 ref,
