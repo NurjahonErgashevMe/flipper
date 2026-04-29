@@ -42,6 +42,7 @@ credentials.json
 secret.json
 *.pem
 services/cookie_manager/accounts.json
+services/cookie_manager/cookies.json
 
 # Logs and DBs
 *.log
