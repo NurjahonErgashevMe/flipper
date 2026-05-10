@@ -414,6 +414,20 @@ EXCLUDE_TAGS = [
     "[id='adfox-stretch-banner']",
 ]
 
+FIRECRAWL_PAGE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/145.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Referer": "https://www.cian.ru/",
+    "Upgrade-Insecure-Requests": "1",
+}
+
 
 class AdParser:
     """
@@ -940,6 +954,8 @@ class AdParser:
             )
 
         # 2. Формируем payload для Firecrawl
+        page_headers = FIRECRAWL_PAGE_HEADERS.copy()
+        page_headers["Cookie"] = cookies_str
         payload = {
             "url": url,
             "excludeTags": EXCLUDE_TAGS,
@@ -952,7 +968,10 @@ class AdParser:
                     "systemPrompt": SYSTEM_PROMPT,
                 },
             ],
-            "headers": {"Cookie": cookies_str} if cookies_str else {},
+            # Cian часто отдаёт урезанную/антибот-страницу, если прийти только
+            # с Cookie без нормальных браузерных заголовков. Поэтому в Firecrawl
+            # передаём тот же набор заголовков, что использовали бы в браузере.
+            "headers": page_headers,
         }
 
         headers = {
@@ -1034,6 +1053,25 @@ class AdParser:
             raw_html = data_obj.get("rawHtml", "")
             if raw_html:
                 creation_date = self._extract_creation_date_from_html(raw_html)
+
+            markdown = data_obj.get("markdown") or ""
+            if not creation_date:
+                raw_len = len(raw_html or "")
+                md_len = len(markdown or "")
+                looks_like_stub = (
+                    raw_len < 20000
+                    or md_len < 1200
+                    or "captcha" in (raw_html or "").lower()
+                    or "робот" in (raw_html or "").lower()
+                    or "доступ огранич" in (raw_html or "").lower()
+                )
+                if looks_like_stub:
+                    snippet = re.sub(r"\s+", " ", (markdown or raw_html or "")[:300])
+                    raise ValueError(
+                        "Firecrawl returned incomplete Cian page "
+                        f"(rawHtml={raw_len}, markdown={md_len}, creationDate=missing). "
+                        f"Snippet: {snippet}"
+                    )
 
             # 4. Проверяем наличие JSON данных от AI
             if "json" not in data_obj:

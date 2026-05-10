@@ -279,7 +279,24 @@ class QueueManager:
     async def _parse_with_retry(self, worker_id: int, url: str):
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
-            parsed_data = await self.parser.parse_async(url)
+            try:
+                parsed_data = await self.parser.parse_async(url)
+            except ValueError as exc:
+                err = str(exc)
+                retryable = (
+                    "firecrawl" in err.lower()
+                    or "scrape" in err.lower()
+                    or "incomplete cian page" in err.lower()
+                )
+                if retryable and attempt < max_attempts:
+                    logger.warning(
+                        "[Worker-%s] Retryable scrape error (attempt %s/%s) for %s: %s",
+                        worker_id, attempt, max_attempts, url, err[:300],
+                    )
+                    await asyncio.sleep(3.0 * attempt)
+                    continue
+                raise
+
             parsed_dict = parsed_data.model_dump(mode="json")
 
             cian_id_ok = bool((parsed_data.cian_id or "").strip())
