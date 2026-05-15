@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
-from sqlalchemy import select, delete, text
+from sqlalchemy import select, delete, update, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
 
@@ -51,9 +51,22 @@ class DatabaseRepository:
 
         async with _base.AsyncSessionLocal() as session:
             if not normalized:
+                await session.execute(
+                    update(CianActiveAd)
+                    .where(CianActiveAd.filter_id.isnot(None))
+                    .values(filter_id=None)
+                )
                 await session.execute(delete(CianFilter))
             else:
                 urls_only = [x["url"] for x in normalized]
+                stale_ids = (
+                    select(CianFilter.id).where(CianFilter.url.not_in(urls_only))
+                )
+                await session.execute(
+                    update(CianActiveAd)
+                    .where(CianActiveAd.filter_id.in_(stale_ids))
+                    .values(filter_id=None)
+                )
                 await session.execute(
                     delete(CianFilter).where(CianFilter.url.not_in(urls_only))
                 )
